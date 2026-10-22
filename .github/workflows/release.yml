@@ -1,0 +1,153 @@
+name: Release
+
+# A release is a branch, never a hand-made tag: cut release/X.Y.Z from develop, open a PR into
+# main and merge it with a merge commit. That merge is the whole release. The branch name is the
+# single source of the version, and everything below is stamped from it, so the GitHub Release
+# (and its vX.Y.Z tag, created here), the zip and the version the live game shows can never
+# disagree.
+#
+# Unlike a PR-triggered workflow, this runs on the push to main: the github-pages environment
+# only accepts deployments from main, and a pull_request event runs on refs/pull/N/merge. The
+# release branch is recovered from the PR that produced the pushed merge commit.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create the tag and the GitHub Release
+  pages: write # deploy to GitHub Pages
+  id-token: write # required by actions/deploy-pages
+  issues: write # close the version's milestone
+  pull-requests: write # open the back-merge PR into develop
+
+# Never run two deployments at once; never cancel one halfway.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      MERGE_SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # main only receives releases, so the pushed commit must be the merge of a release/X.Y.Z PR.
+      # release/X.Y.Z (or release/vX.Y.Z) -> X.Y.Z, refused if that version was already released.
+      - name: Resolve and validate the version
+        id: version
+        run: |
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA/pulls" \
+            --jq '[.[] | select(.merged_at != null and .base.ref == "main")][0] | "\(.number) \(.head.ref)"')"
+          number="${pr%% *}"
+          branch="${pr#* }"
+          if [[ -z "$pr" || "$pr" == "null" || "$branch" != release/* ]]; then
+            echo "::error::main only receives releases: this push is not the merge of a release/X.Y.Z PR (found '${pr:-nothing}')."
+            exit 1
+          fi
+          version="${branch#release/}"
+          version="${version#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release branches must be named release/X.Y.Z (got '$branch')."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            echo "::error::v$version is already released (tag v$version exists). Bump the version."
+            exit 1
+          fi
+          echo "Version: $version (PR #$number from $branch)"
+          echo "### Release \`$version\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "value=$version"
+            echo "branch=$branch"
+            echo "pr=$number"
+          } >> "$GITHUB_OUTPUT"
+
+      # The site is the game's static files plus version.json, which the start screen reads.
+      - name: Build the site
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          mkdir -p _site
+          cp index.html game.js .nojekyll _site/
+          printf '{"version":"%s"}\n' "$VERSION" > _site/version.json
+          reported="$(jq -r .version _site/version.json)"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::The site reports '$reported', expected '$VERSION'."
+            exit 1
+          fi
+          pkg="war-is-war-$VERSION"
+          cp -r _site "$pkg"
+          zip -qr "$pkg.zip" "$pkg"
+          echo "PACKAGE=$pkg.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4
+
+      # The guarantee, checked rather than assumed: the live site must report exactly the release
+      # version before the release is published. The query string bypasses the Pages CDN cache.
+      - name: Verify the live site reports the release version
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          reported=""
+          for _ in $(seq 1 30); do
+            reported="$(curl -sf "${PAGE_URL%/}/version.json?run=$GITHUB_RUN_ID" | jq -r .version || true)"
+            [ "$reported" = "$VERSION" ] && break
+            sleep 10
+          done
+          echo "Release: $VERSION, live site reports: ${reported:-<no answer>}"
+          if [ "$reported" != "$VERSION" ]; then
+            echo "::error::The live site reports '${reported:-<no answer>}', expected '$VERSION'."
+            exit 1
+          fi
+
+      - name: Create the GitHub Release and its tag
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+          BRANCH: ${{ steps.version.outputs.branch }}
+          PR: ${{ steps.version.outputs.pr }}
+          PAGE_URL: ${{ steps.deploy.outputs.page_url }}
+        run: |
+          # 0.x releases are pre-production (see CLAUDE.md "Versions and releases").
+          prerelease=""; [[ "$VERSION" == 0.* ]] && prerelease="--prerelease"
+          gh release create "v$VERSION" "$PACKAGE" --target "$MERGE_SHA" --title "v$VERSION" --generate-notes $prerelease \
+            --notes "Released from \`$BRANCH\` (PR #$PR). Live at $PAGE_URL, where the start screen shows **v$VERSION**."
+
+      # Every version has a milestone (vX.Y.Z) grouping its issues; releasing closes it.
+      - name: Close the version's milestone
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          number="$(gh api "repos/$GITHUB_REPOSITORY/milestones?state=open" --jq ".[] | select(.title == \"v$VERSION\") | .number")"
+          if [ -n "$number" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/milestones/$number" -f state=closed > /dev/null
+            echo "Closed milestone v$VERSION."
+          else
+            echo "No open milestone v$VERSION."
+          fi
+
+      # main now has the release merge (and any fixes made on the release branch); bring them back
+      # so develop carries the tag in its history and nothing is lost. Never fails the release.
+      - name: Open the back-merge PR into develop
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          gh pr create --base develop --head main \
+            --title "Back-merge release v$VERSION into develop" \
+            --body "Brings the v$VERSION release merge from \`main\` back into \`develop\`. Merge with **Create a merge commit**." \
+            || echo "::warning::Couldn't open the back-merge PR; open main -> develop by hand."

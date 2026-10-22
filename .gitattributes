@@ -1,0 +1,4 @@
+* text=auto
+# Shell scripts run on Linux runners; CRLF line endings would break bash.
+*.sh text eol=lf
+*.yml text eol=lf
