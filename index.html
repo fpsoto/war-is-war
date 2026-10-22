@@ -180,6 +180,7 @@
     #overlay button:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--blue-dark); }
     .keys { margin-top: clamp(12px, 3vh, 22px); font-size: clamp(12px, min(3.4vw, 3.6vh), 15px); opacity: .85; }
     .keys .touch { display: none; }
+    .version { margin-top: 10px; font-size: 13px; opacity: .6; letter-spacing: 1px; }
     @media (pointer: coarse) {
       .keys .desk { display: none; }
       .keys .touch { display: inline; }
@@ -233,6 +234,7 @@
         <span class="desk">Drag or use ◀ ▶ / A D to move · auto-fire</span>
         <span class="touch">Slide your finger sideways to move · auto-fire</span>
       </div>
+      <div class="version" id="version">dev</div>
     </div>
   </div>
   <script type="module" src="game.js"></script>

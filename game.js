@@ -1325,6 +1325,13 @@ function frame() {
   requestAnimationFrame(frame);
 }
 
+// version.json is written by the release workflow at deploy time (see .github/workflows/release.yml),
+// so the version is never hand-edited. Local and unreleased builds have no file and show "dev".
+fetch('version.json', { cache: 'no-store' })
+  .then((r) => (r.ok ? r.json() : null))
+  .then((v) => { if (v && v.version) $('version').textContent = `v${v.version}`; })
+  .catch(() => {});
+
 // URL params: ?play starts immediately, ?level=3 jumps to a stage
 const params = new URLSearchParams(location.search);
 const startIdx = THREE.MathUtils.clamp((parseInt(params.get('level'), 10) || 1) - 1, 0, LEVELS.length - 1);
