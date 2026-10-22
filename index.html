@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#4f86c8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>War is War</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Lilita+One&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --blue: #2f6fe0;
+      --blue-dark: #1b3f8f;
+      --red: #e5262b;
+      --ink: #0f1a2e;
+      /* unidad que escala con el lado más corto de la pantalla */
+      --u: clamp(0.7px, 0.25vmin, 1.15px);
+      --safe-t: env(safe-area-inset-top, 0px);
+      --safe-b: env(safe-area-inset-bottom, 0px);
+      --safe-l: env(safe-area-inset-left, 0px);
+      --safe-r: env(safe-area-inset-right, 0px);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; width: 100%; height: 100%; overflow: hidden;
+      position: fixed; inset: 0;
+      background: #a9c8e6;
+      font-family: 'Lilita One', system-ui, sans-serif;
+      color: #fff;
+      user-select: none; -webkit-user-select: none;
+      -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+      touch-action: none; overscroll-behavior: none;
+    }
+    canvas { display: block; position: fixed; inset: 0; width: 100% !important; height: 100% !important; }
+
+    #hud {
+      position: fixed; inset: 0; pointer-events: none;
+      padding: calc(var(--safe-t) + 12px) calc(var(--safe-r) + 16px) calc(var(--safe-b) + 14px) calc(var(--safe-l) + 16px);
+      display: flex; flex-direction: column; align-items: center;
+    }
+    .enemy-bar {
+      width: min(360px, 78vw);
+      display: flex; align-items: center; gap: calc(8 * var(--u));
+    }
+    .skull {
+      width: calc(34 * var(--u)); height: calc(34 * var(--u)); flex: none; border-radius: 50%;
+      background: var(--red); border: calc(3 * var(--u)) solid #fff;
+      display: grid; place-items: center; font-size: calc(18 * var(--u));
+      box-shadow: 0 2px 0 rgba(0,0,0,.35);
+    }
+    .bar {
+      position: relative; flex: 1; height: calc(16 * var(--u)); border-radius: 3px;
+      background: #2a1414; border: 2px solid #111;
+      overflow: hidden;
+    }
+    .bar > i {
+      position: absolute; inset: 0; transform-origin: left center;
+      background: linear-gradient(#ff5a4f, var(--red) 60%, #a8141a);
+      transition: transform .15s ease-out;
+    }
+    .bar.hp > i { background: linear-gradient(#7cf08a, #2cbf47 60%, #1c8a32); }
+    .count {
+      min-width: calc(50 * var(--u)); text-align: right; font-size: calc(22 * var(--u));
+      text-shadow: 0 2px 0 var(--ink), 0 0 6px rgba(0,0,0,.4);
+    }
+    .enemy-bar.boss { margin-top: calc(8 * var(--u)); width: min(300px, 66vw); }
+    .enemy-bar.boss .skull { background: #6a1f8f; }
+    .enemy-bar.boss .bar > i { background: linear-gradient(#d07bff, #9b2fd6 60%, #5e1385); }
+    .enemy-bar.boss .count { font-size: calc(18 * var(--u)); }
+    .hidden { display: none !important; }
+    .stage {
+      margin-top: calc(8 * var(--u)); text-align: center; font-size: calc(18 * var(--u)); letter-spacing: 1px;
+      text-shadow: 0 2px 0 var(--ink);
+    }
+    .bottom {
+      margin-top: auto; width: 100%;
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .player-bar {
+      width: min(220px, 48vw);
+      display: flex; align-items: center; gap: calc(8 * var(--u));
+    }
+    .player-bar .skull { background: var(--blue); }
+    .kills {
+      font-size: calc(22 * var(--u)); text-shadow: 0 2px 0 var(--ink); white-space: nowrap;
+    }
+
+    .squad {
+      flex: none; font-size: calc(22 * var(--u)); text-shadow: 0 2px 0 var(--ink);
+    }
+    #powers {
+      margin-top: auto; margin-bottom: calc(8 * var(--u));
+      display: flex; flex-wrap: wrap; justify-content: center; gap: 6px;
+    }
+    .pw {
+      padding: calc(4 * var(--u)) calc(10 * var(--u)); border-radius: 6px;
+      font-size: calc(16 * var(--u)); border: 2px solid #fff;
+      text-shadow: 0 1px 0 rgba(0,0,0,.4);
+      box-shadow: 0 3px 0 rgba(0,0,0,.3);
+    }
+    .pw.rapid { background: #e8a90f; }
+    .pw.pierce { background: #9b2fd6; }
+    .bottom { margin-top: 0; }
+
+    #toast {
+      position: fixed; left: 0; right: 0; top: 52%; height: 0;
+      pointer-events: none; text-align: center;
+    }
+    .toast {
+      position: absolute; left: 0; right: 0;
+      font-size: clamp(26px, min(8vw, 9vh), 48px);
+      text-shadow: 0 3px 0 var(--ink), 0 0 12px rgba(0,0,0,.4);
+      -webkit-text-stroke: 1px rgba(15,26,46,.6);
+      animation: toastUp 1.3s ease-out forwards;
+    }
+    @keyframes toastUp {
+      0% { transform: translateY(20px) scale(.6); opacity: 0; }
+      15% { transform: translateY(0) scale(1.1); opacity: 1; }
+      30% { transform: translateY(-6px) scale(1); }
+      100% { transform: translateY(-70px) scale(1); opacity: 0; }
+    }
+
+    #banner {
+      position: fixed; left: 16px; right: 16px; top: 34%; text-align: center;
+      pointer-events: none; opacity: 0; transform: scale(.85);
+      transition: opacity .35s, transform .35s;
+    }
+    #banner.on { opacity: 1; transform: scale(1); }
+    #banner b {
+      display: block; font-weight: 400; font-size: clamp(36px, min(11vw, 13vh), 80px);
+      text-shadow: 0 5px 0 var(--blue-dark), 0 10px 24px rgba(0,0,0,.45);
+    }
+    #banner span { font-size: clamp(15px, min(4vw, 4.5vh), 24px); text-shadow: 0 2px 0 var(--ink); }
+
+    #hurt {
+      position: fixed; inset: 0; pointer-events: none; opacity: 0;
+      box-shadow: inset 0 0 min(120px, 18vmin) min(30px, 5vmin) rgba(229, 38, 43, .75);
+      transition: opacity .25s;
+    }
+    #hurt.on { opacity: 1; transition: none; }
+
+    #overlay {
+      position: fixed; inset: 0; display: grid; place-items: center;
+      background: radial-gradient(ellipse at center, rgba(15,26,46,.35), rgba(15,26,46,.75));
+      padding: calc(var(--safe-t) + 16px) calc(var(--safe-r) + 16px) calc(var(--safe-b) + 16px) calc(var(--safe-l) + 16px);
+      text-align: center; overflow-y: auto;
+    }
+    #overlay.hidden { display: none; }
+    #overlay > div { max-width: 640px; }
+    #overlay h1 {
+      margin: 0; font-size: clamp(40px, min(12vw, 16vh), 96px); line-height: .95; font-weight: 400;
+      letter-spacing: 1px;
+      text-shadow: 0 5px 0 var(--blue-dark), 0 10px 24px rgba(0,0,0,.45);
+    }
+    #overlay p {
+      margin: clamp(8px, 2vh, 14px) 0 clamp(14px, 4vh, 26px);
+      font-size: clamp(15px, min(4vw, 4.5vh), 22px);
+      text-shadow: 0 2px 0 var(--ink);
+      opacity: .95;
+    }
+    #overlay button {
+      font: inherit; font-size: clamp(20px, min(6vw, 6vh), 30px); color: #fff; cursor: pointer;
+      padding: clamp(8px, 1.8vh, 12px) clamp(28px, 7vw, 40px); min-height: 48px; border-radius: 10px;
+      background: linear-gradient(#4f8cff, var(--blue) 55%, var(--blue-dark));
+      border: 3px solid #fff;
+      box-shadow: 0 6px 0 var(--blue-dark), 0 12px 20px rgba(0,0,0,.35);
+      text-shadow: 0 2px 0 var(--blue-dark);
+      touch-action: manipulation;
+    }
+    #overlay button:active { transform: translateY(4px); box-shadow: 0 2px 0 var(--blue-dark); }
+    .keys { margin-top: clamp(12px, 3vh, 22px); font-size: clamp(12px, min(3.4vw, 3.6vh), 15px); opacity: .85; }
+    .keys .touch { display: none; }
+    @media (pointer: coarse) {
+      .keys .desk { display: none; }
+      .keys .touch { display: inline; }
+    }
+
+    /* móvil en horizontal: muy poco alto, compactamos el HUD */
+    @media (max-height: 460px) and (orientation: landscape) {
+      #hud { padding-top: calc(var(--safe-t) + 6px); padding-bottom: calc(var(--safe-b) + 8px); }
+      .enemy-bar { width: min(320px, 46vw); }
+      .enemy-bar.boss { width: min(260px, 38vw); margin-top: 4px; }
+      .stage { margin-top: 4px; }
+      #banner { top: 26%; }
+    }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div class="enemy-bar">
+      <div class="skull">☠</div>
+      <div class="bar"><i id="enemyFill"></i></div>
+      <div class="count" id="enemyCount">100</div>
+    </div>
+    <div class="enemy-bar boss hidden" id="bossBar">
+      <div class="skull">👹</div>
+      <div class="bar"><i id="bossFill"></i></div>
+      <div class="count">JEFE</div>
+    </div>
+    <div class="stage" id="stageLabel">ETAPA 1</div>
+    <div id="powers"></div>
+    <div class="bottom">
+      <div class="player-bar">
+        <div class="skull">♥</div>
+        <div class="bar hp"><i id="hpFill"></i></div>
+        <div class="squad" id="squadCount">x1</div>
+      </div>
+      <div class="kills" id="kills">0 bajas</div>
+    </div>
+  </div>
+  <div id="hurt"></div>
+  <div id="toast"></div>
+  <div id="banner"><b id="bannerTitle">ETAPA 1</b><span id="bannerText"></span></div>
+  <div id="overlay">
+    <div>
+      <h1 id="ovTitle">WAR IS WAR</h1>
+      <p id="ovText">Detén a la horda y dispara a los carteles de los bordes para ganar refuerzos</p>
+      <button id="ovBtn">JUGAR</button>
+      <div class="keys">
+        <span class="desk">Arrastra o usa ◀ ▶ / A D para moverte · disparo automático</span>
+        <span class="touch">Desliza el dedo a los lados para moverte · disparo automático</span>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="game.js"></script>
+</body>
+</html>
