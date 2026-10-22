@@ -1,0 +1,58 @@
+name: Close linked issues
+
+# GitHub only auto-closes "Closes #N" issues when a PR lands on the default branch (main). Work
+# merges into develop, and a case is done when its PR is merged — so this closes the referenced
+# issues on merge into develop (or into a release/X.Y.Z branch, for fixes made during a
+# release), leaving the PR's Summary as the issue's closing record.
+on:
+  pull_request:
+    types: [closed]
+    branches: [develop, "release/**"]
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  close:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+
+            // Same keywords GitHub itself recognizes: close(s/d), fix(es/ed), resolve(s/d).
+            const numbers = [...body.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s+#(\d+)/gi)]
+              .map((m) => Number(m[1]))
+              .filter((n, i, all) => all.indexOf(n) === i);
+            if (numbers.length === 0) {
+              core.info('No linked issues in the PR body.');
+              return;
+            }
+
+            // The PR's "## Summary" section becomes the closing comment: what was implemented.
+            const summary = (body.match(/##\s*Summary\s*\n([\s\S]*?)(?=\n##\s|$)/i)?.[1] || '')
+              .replace(/<!--[\s\S]*?-->/g, '')
+              .trim();
+            const comment = [
+              `Implemented in #${pr.number} (${pr.title}), merged into \`${pr.base.ref}\`.`,
+              summary ? `\n### What was implemented\n${summary}` : '',
+            ].join('\n');
+
+            for (const issue_number of numbers) {
+              const { data: issue } = await github.rest.issues.get({ ...context.repo, issue_number });
+              if (issue.pull_request) {
+                core.info(`#${issue_number} is a pull request, skipping.`);
+                continue;
+              }
+              if (issue.state === 'closed') {
+                core.info(`#${issue_number} is already closed.`);
+                continue;
+              }
+              await github.rest.issues.createComment({ ...context.repo, issue_number, body: comment });
+              await github.rest.issues.update({ ...context.repo, issue_number, state: 'closed', state_reason: 'completed' });
+              core.info(`Closed #${issue_number}.`);
+            }

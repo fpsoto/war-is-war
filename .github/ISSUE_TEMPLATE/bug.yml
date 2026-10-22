@@ -1,0 +1,36 @@
+name: Bug
+description: Something behaves differently from what it should.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behavior, with exact error messages (browser console) or screenshots.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Device, browser, orientation, stage and the game version shown on the start screen.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Suspected cause, workaround, related issues (optional).

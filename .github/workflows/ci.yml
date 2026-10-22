@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop, "release/**"]
+  pull_request:
+    branches: [main, develop, "release/**"]
+
+permissions:
+  contents: read
+
+# One run per ref; a newer push cancels the older in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags and history, for the version
+
+      # Every build carries a version derived from git (see .github/scripts/resolve-version.sh):
+      # X.Y.Z-rc.N on release/X.Y.Z branches, X.Y.Z+N.g<sha> elsewhere.
+      - name: Resolve version
+        id: version
+        run: bash .github/scripts/resolve-version.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # game.js is an ES module; node only parses it as one with an .mjs extension.
+      - name: Syntax check (version ${{ steps.version.outputs.version }})
+        run: |
+          cp game.js "$RUNNER_TEMP/game.mjs"
+          node --check "$RUNNER_TEMP/game.mjs"
+
+      # The game looks its HUD up by id; a renamed element would only fail at runtime in the
+      # browser, so catch it here.
+      - name: Every element id used by game.js exists in index.html
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const js = readFileSync("game.js", "utf8");
+            const html = readFileSync("index.html", "utf8");
+            const used = [...js.matchAll(/\$\(\x27([\w-]+)\x27\)/g)].map((m) => m[1]);
+            const missing = used.filter((id) => !html.includes(`id="${id}"`));
+            if (missing.length) {
+              console.error(`Missing in index.html: ${missing.join(", ")}`);
+              process.exit(1);
+            }
+            console.log(`OK: ${used.length} ids found.`);
+          '

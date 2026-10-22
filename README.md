@@ -93,7 +93,33 @@ The game has to animate 500+ enemies at 60 fps, including on phones:
 - **Responsive camera.** The camera distance is computed from the horizontal field of view,
   so the full width of the road fits on any aspect ratio.
 
+## Development workflow
+
+Every change is tracked as a GitHub issue that belongs to a sprint and a version milestone.
+The full working agreements are in [CLAUDE.md](CLAUDE.md). In short:
+
+```
+issue (#N, Feature/Bug template, milestone, sprint)
+  └─ branch feature/N-name from develop ── commits "refs #N"
+       └─ PR into develop ("Closes #N" + Summary + Test plan)
+            └─ merge → the issue closes with the PR's summary
+
+end of sprint:
+  develop ── release/X.Y.Z ── PR "Release X.Y.Z" into main ── merge
+                                                               └─ release.yml:
+                                                                  deploy to GitHub Pages
+                                                                  verify the live version
+                                                                  GitHub Release vX.Y.Z + zip
+                                                                  close milestone vX.Y.Z
+                                                                  back-merge PR into develop
+```
+
+- **Branches:** `main` holds only releases, `develop` is the integration branch, and every change gets its own branch from `develop`.
+- **Sprints:** 2 weeks, Thursday to Wednesday, tracked in the "War is War" GitHub Project.
+- **Versions:** semver, with `0.x` for pre-production and `1.0.0` for the first public launch. The release branch name is the only place a version is written.
+
 ## Deployment
 
-The site is served by GitHub Pages from the root of the `main` branch. Every push to `main`
-redeploys it automatically.
+GitHub Pages is built from GitHub Actions, and only the release workflow deploys. The live game
+changes only when a release is merged into `main`. Its start screen shows the released version,
+read from the `version.json` that the release writes.
