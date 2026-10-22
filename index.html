@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
@@ -8,6 +8,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>War is War</title>
+  <meta name="description" content="3D horde shooter in the browser: hold the bridge against 500 soldiers and a giant. Built with Three.js.">
+  <meta property="og:title" content="War is War">
+  <meta property="og:description" content="3D horde shooter in the browser: hold the bridge against 500 soldiers and a giant.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://fpsoto.github.io/war-is-war/">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Lilita+One&display=swap" rel="stylesheet">
@@ -17,7 +22,8 @@
       --blue-dark: #1b3f8f;
       --red: #e5262b;
       --ink: #0f1a2e;
-      /* unidad que escala con el lado más corto de la pantalla */
+      /* UI unit that scales with the screen's shortest side, clamped so HUD
+         elements stay legible on small phones and don't balloon on 4K desktops */
       --u: clamp(0.7px, 0.25vmin, 1.15px);
       --safe-t: env(safe-area-inset-top, 0px);
       --safe-b: env(safe-area-inset-bottom, 0px);
@@ -179,7 +185,7 @@
       .keys .touch { display: inline; }
     }
 
-    /* móvil en horizontal: muy poco alto, compactamos el HUD */
+    /* landscape phones have very little height: compact the HUD */
     @media (max-height: 460px) and (orientation: landscape) {
       #hud { padding-top: calc(var(--safe-t) + 6px); padding-bottom: calc(var(--safe-b) + 8px); }
       .enemy-bar { width: min(320px, 46vw); }
@@ -202,9 +208,9 @@
     <div class="enemy-bar boss hidden" id="bossBar">
       <div class="skull">👹</div>
       <div class="bar"><i id="bossFill"></i></div>
-      <div class="count">JEFE</div>
+      <div class="count">BOSS</div>
     </div>
-    <div class="stage" id="stageLabel">ETAPA 1</div>
+    <div class="stage" id="stageLabel">STAGE 1</div>
     <div id="powers"></div>
     <div class="bottom">
       <div class="player-bar">
@@ -212,20 +218,20 @@
         <div class="bar hp"><i id="hpFill"></i></div>
         <div class="squad" id="squadCount">x1</div>
       </div>
-      <div class="kills" id="kills">0 bajas</div>
+      <div class="kills" id="kills">0 kills</div>
     </div>
   </div>
   <div id="hurt"></div>
   <div id="toast"></div>
-  <div id="banner"><b id="bannerTitle">ETAPA 1</b><span id="bannerText"></span></div>
+  <div id="banner"><b id="bannerTitle">STAGE 1</b><span id="bannerText"></span></div>
   <div id="overlay">
     <div>
       <h1 id="ovTitle">WAR IS WAR</h1>
-      <p id="ovText">Detén a la horda y dispara a los carteles de los bordes para ganar refuerzos</p>
-      <button id="ovBtn">JUGAR</button>
+      <p id="ovText">Stop the horde and shoot the signs on the edges to get reinforcements</p>
+      <button id="ovBtn">PLAY</button>
       <div class="keys">
-        <span class="desk">Arrastra o usa ◀ ▶ / A D para moverte · disparo automático</span>
-        <span class="touch">Desliza el dedo a los lados para moverte · disparo automático</span>
+        <span class="desk">Drag or use ◀ ▶ / A D to move · auto-fire</span>
+        <span class="touch">Slide your finger sideways to move · auto-fire</span>
       </div>
     </div>
   </div>

@@ -1,37 +1,99 @@
 # War is War
 
-Shooter 3D de hordas (Three.js) sobre un puente entre las nubes. Tu pelotón dispara
-automáticamente mientras cientos de enemigos avanzan hacia ti.
+A 3D horde shooter that runs in the browser, built with [Three.js](https://threejs.org/).
+Your squad holds a bridge above the clouds and fires automatically while hundreds of
+enemies march towards it. Shoot the signs along the edges to recruit soldiers and
+grab power-ups.
 
-**Jugar:** https://fpsoto.github.io/war-is-war/
+**▶ Play it here: https://fpsoto.github.io/war-is-war/**
 
-## Etapas
+Works on desktop, tablets and phones (portrait and landscape).
 
-1. 100 soldados en formación.
-2. 500 soldados de pared a pared.
-3. 500 soldados y un gigante en el centro.
+## How to play
 
-## Power-ups
+| Input | Action |
+|---|---|
+| Drag (mouse or finger) | Move the squad left / right |
+| `◀` `▶` or `A` `D` | Move the squad left / right |
+| `Space` / `Enter` | Confirm on menus |
 
-Los carteles de los bordes avanzan desde el fondo. Dispárales hasta vaciar su barra:
+Firing is automatic. Every enemy that reaches your squad, or slips past it, costs health.
 
-- **+1 SOLDADO** — se une otro soldado al pelotón (máx. 8, se conservan entre etapas).
-- **x2 CADENCIA** — doble cadencia de disparo durante 8 s.
-- **+30 VIDA** — recupera vida.
-- **PERFORA** — las balas atraviesan hasta 4 enemigos durante 6 s.
+### Stages
 
-## Controles
+1. **100 soldiers** marching in a tight formation.
+2. **500 soldiers** filling the bridge wall to wall.
+3. **500 soldiers and a giant**: a club-wielding brute about 3.6× the size of a soldier
+   walks in the middle of the horde. It soaks bullets and crushes the squad if it reaches it.
 
-- Arrastra (ratón o dedo) o usa ◀ ▶ / A D para moverte. El disparo es automático.
-- `?level=2` o `?level=3` en la URL salta a esa etapa.
+Clearing a stage takes you to the next one, and you keep any soldiers you recruited.
 
-## Ejecutar en local
+### Power-ups
 
-Los módulos ES necesitan un servidor:
+Signs travel down both edges of the bridge. Shoot one until its bar is empty to collect it:
 
-```
+| Sign | Effect |
+|---|---|
+| **+1 SOLDIER** | Another soldier joins the squad (max 8) |
+| **x2 FIRE RATE** | Double fire rate for 8 s |
+| **+30 HEALTH** | Restores health |
+| **PIERCE** | Bullets go through up to 4 enemies for 6 s |
+
+## Running locally
+
+There is no build step. Three.js is loaded from the jsDelivr CDN through an
+[import map](https://developer.mozilla.org/docs/Web/HTML/Element/script/type/importmap).
+ES modules do not load from `file://`, so serve the folder over HTTP:
+
+```bash
 npx serve .
+# or
+python -m http.server 8000
 ```
 
-No hay paso de build: Three.js se carga desde jsDelivr mediante un import map.
-La dificultad se ajusta en `LEVELS` y `POWERUPS` al principio de `game.js`.
+Then open the printed URL. Handy URL parameters:
+
+- `?level=2` or `?level=3` jumps straight to a stage.
+- `?play` skips the start screen.
+
+## Project structure
+
+```
+index.html   HUD, overlays and responsive CSS; loads Three.js via an import map
+game.js      the whole game: scene, squad, enemies, boss, bullets, power-ups, loop
+.nojekyll    tells GitHub Pages to serve the files as-is
+```
+
+## Tuning
+
+All the balance knobs live at the top of `game.js`:
+
+- `CFG`: road size, bullet speed and range, player health, the distance at which the horde breaks formation.
+- `LEVELS`: enemy count, formation, speed, HP, starting squad size, fire rate, contact damage and boss stats per stage.
+- `POWERUPS`: label, colours, hits needed and spawn weight of each sign.
+
+## How it stays fast
+
+The game has to animate 500+ enemies at 60 fps, including on phones:
+
+- **Instancing.** Enemies are not individual meshes. Each body part (torso, head, arms, legs)
+  is a single `InstancedMesh`, so the whole horde takes 6 draw calls per render pass. The walk cycle is applied by
+  writing one matrix per part per enemy.
+- **Struct-of-arrays state.** Per-enemy data lives in typed arrays (`E.x`, `E.z`, `E.hp`, …).
+  Bullets and particles use fixed-size pools built the same way. Nothing is allocated in the
+  game loop, so there are no garbage-collection pauses.
+- **Swept collisions.** Bullets move about one unit per frame. Hits are tested against the
+  segment each bullet covered during the frame, so fast bullets can't pass through enemies.
+  When several targets overlap, the one closest to the player is hit, so front ranks shield
+  the ones behind.
+- **Local separation only.** Enemies push each other apart (O(k²)) only after they break
+  formation near the squad. Further away, the grid spacing keeps them apart.
+- **Procedural assets.** Every texture (road, clouds, signs) is drawn on a canvas at runtime.
+  The game ships no image files.
+- **Responsive camera.** The camera distance is computed from the horizontal field of view,
+  so the full width of the road fits on any aspect ratio.
+
+## Deployment
+
+The site is served by GitHub Pages from the root of the `main` branch. Every push to `main`
+redeploys it automatically.
