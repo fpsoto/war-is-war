@@ -53,14 +53,18 @@ python -m http.server 8000
 
 Then open the printed URL. Handy URL parameters:
 
-- `?level=2` or `?level=3` jumps straight to a stage.
+- `?stage=2` or `?stage=3` jumps straight to a stage (`?level=` also works).
 - `?play` skips the start screen.
+- `?cap=120` lowers the active-enemy cap, to test reinforcements or performance on weak devices.
+- `?debug` exposes `window.__warIsWar` in the console: live state, plus `step(seconds)` to advance the
+  simulation without rendering and `aim('sweep')` as an autopilot, for automated checks of stage flow.
 
 ## Project structure
 
 ```
 index.html             HUD, overlays and responsive CSS; loads Three.js via an import map
-game.js                the whole game: scene, squad, enemies, boss, bullets, power-ups, loop
+game.js                the game: scene, squad, enemy pool, wave spawner, boss, bullets, power-ups, loop
+stages.js              campaign data: enemy types, bosses and stages (validated in CI)
 docs/level-design.md   the 30-stage campaign design
 .github/               issue and PR templates, CI and the release workflow
 .nojekyll              tells GitHub Pages to serve the files as-is
@@ -68,11 +72,13 @@ docs/level-design.md   the 30-stage campaign design
 
 ## Tuning
 
-All the balance knobs live at the top of `game.js`:
-
-- `CFG`: road size, bullet speed and range, player health, the distance at which the horde breaks formation.
-- `LEVELS`: enemy count, formation, speed, HP, starting squad size, fire rate, contact damage and boss stats per stage.
-- `POWERUPS`: label, colours, hits needed and spawn weight of each sign.
+- `stages.js`: enemy and boss stats, and every stage as data. A stage lists its waves (enemy counts
+  per type, formation, boss, downtime, and when the next wave starts), plus the starting squad, pace,
+  fire rate, contact damage and reward.
+- `CFG` at the top of `game.js`: road size, the active-enemy cap, the reinforcement entry point,
+  the default wave downtime, bullet speed and range, player health, and the distance at which the
+  horde breaks formation.
+- `POWERUPS` in `game.js`: label, colours, hits needed and spawn weight of each sign.
 
 ## How it stays fast
 

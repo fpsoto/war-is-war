@@ -57,8 +57,9 @@ Issues and PRs share one number sequence. Labels: `feature`, `bug`, `chore`, plu
 
 A 3D horde shooter in the browser. Static site, no build step: `index.html` (HUD, overlays, responsive CSS, Three.js import map) and `game.js` (the whole game). Live at https://fpsoto.github.io/war-is-war/.
 
-- Run locally with any static server (`npx serve .`); ES modules don't load from `file://`. `?level=N` jumps to a stage, `?play` skips the start screen.
-- Balance lives in `CFG`, `LEVELS` and `POWERUPS` at the top of `game.js`.
+- Run locally with any static server (`npx serve .`); ES modules don't load from `file://`. `?stage=N` jumps to a stage, `?play` skips the start screen, `?cap=N` lowers the active-enemy cap.
+- Stages are data in `stages.js` (no imports, validated by `validateStages()` at startup and in CI). The stage manager and wave spawner in `game.js` turn them into waves under an active-enemy cap with a reinforcement queue. Other balance lives in `CFG` and `POWERUPS` in `game.js`.
+- **Verifying gameplay changes:** headless browsers don't produce animation frames, so screenshots only show the first instants. Use `?debug`: `window.__warIsWar.step(seconds)` advances the simulation without rendering, `aim('sweep')` is an autopilot, `stages`/`start(idx)` load a throwaway test stage, and the getters expose state (remaining, active, queued rows, wave counts). Drive it from a scratch HTML page that loads the game in an iframe, run it with `msedge --headless=new --dump-dom`, and don't commit the scratch page.
 - **The 30-stage campaign is specified in [docs/level-design.md](docs/level-design.md)** (enemy types, stages, rewards, difficulty tiers, bosses, technical requirements). Read it before working on any campaign issue. Its §11 records how the spec is adapted to this codebase. Update §11 when an adaptation decision changes.
 - On Windows PowerShell 5.1, save helper `.ps1` scripts with a UTF-8 BOM (without one they are read as ANSI and characters like `–` break string parsing), and write issue/PR bodies to files as UTF-8 **without** BOM.
 - Performance rules (the game animates 500+ enemies on phones):
