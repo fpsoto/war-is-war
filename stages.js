@@ -39,6 +39,30 @@ export const ENEMY_TYPES = {
   },
 };
 
+/*
+ * Difficulty tiers (docs/level-design.md §5). Every stage falls in exactly one tier by its id,
+ * and the stage manager applies the tier on top of the stage's own data:
+ *   speed            multiplier on every enemy's speed (and the boss's), on top of stage pace
+ *   soldierHp        multiplier on the basic soldier's HP only. It is meant to be matched by
+ *                    damage rewards: the stage 5 rifle upgrade (+15%) answers tier 2's 1.15.
+ *   maxWaves         how many waves may be on the bridge at once
+ *   overlap          with maxWaves > 1, a wave without its own `whenRemaining` starts once the
+ *                    previous wave is down to this fraction of its size (0 = fully cleared)
+ *   downtime         [min, max] seconds before a wave without its own `downtime`; picked at random
+ *   specialFrequency the design's "special enemy frequency" label. Stage compositions already
+ *                    encode it in their counts; endless mode (#32) uses it to build waves.
+ */
+export const DIFFICULTY_TIERS = [
+  { stages: [1, 5], speed: 1.0, soldierHp: 1.0, maxWaves: 2, overlap: 0.2, downtime: [5, 8], specialFrequency: 'low' },
+  { stages: [6, 15], speed: 1.1, soldierHp: 1.15, maxWaves: 3, overlap: 0.3, downtime: [4, 7], specialFrequency: 'medium' },
+  { stages: [16, 25], speed: 1.2, soldierHp: 1.3, maxWaves: 4, overlap: 0.4, downtime: [3, 6], specialFrequency: 'high' },
+  { stages: [26, 30], speed: 1.25, soldierHp: 1.4, maxWaves: 5, overlap: 0.5, downtime: [2, 5], specialFrequency: 'very high' },
+];
+
+export function tierFor(stageId) {
+  return DIFFICULTY_TIERS.find((t) => stageId >= t.stages[0] && stageId <= t.stages[1]);
+}
+
 export const BOSS_TYPES = {
   brute: { hp: 160, scale: 3.6 },
 };
@@ -47,16 +71,20 @@ export const BOSS_TYPES = {
  * Stage fields:
  *   id, name, text      shown in the banner and the end-of-stage screens
  *   squad               soldiers the stage starts with (at least; earned soldiers carry over)
- *   pace                multiplier on every enemy's base speed in this stage
- *   fireInterval        seconds between volleys (the weapon system in #14 replaces this)
+ *   pace                multiplier on every enemy's base speed in this stage (the tier's speed
+ *                       multiplier applies on top)
+ *   fireInterval        seconds between shots while a magazine lasts
  *   contactDamage       health lost per enemy that reaches or slips past the squad
  *   reward              granted when the stage is cleared (applied by #17; recorded here now)
  *   waves[]:
  *     enemies           { type: count } — the total this wave brings, not the number on screen at once
  *     formation         cols + spacingZ + startZ, and either spacingX or fullWidth: true
  *     boss              optional { type, gap }: spawns in a hole of radius `gap` in the formation
- *     downtime          seconds to wait before this wave once its trigger is met (not for wave 1)
- *     whenRemaining     start once the previous wave has at most this many enemies left (default 0)
+ *     downtime          seconds to wait before this wave once its trigger is met (not for wave 1);
+ *                       default: a random pick in the tier's downtime range
+ *     whenRemaining     start once the previous wave has at most this many enemies left;
+ *                       default: the tier's overlap share of the previous wave's size
+ *   A wave never starts while the tier's maxWaves waves are already on the bridge.
  */
 export const STAGES = [
   {
@@ -110,6 +138,18 @@ export function validateStages(stages = STAGES) {
     if (typeof t.plated !== 'boolean') bad('plated must be a boolean');
     for (const k of ['body', 'skin']) if (!Array.isArray(t[k]) || !t[k].length || !t[k].every(color)) bad(`${k} must be a list of #rrggbb colors`);
   }
+  // Tiers must cover stages 1..30 contiguously, without gaps or overlaps.
+  let expect = 1;
+  DIFFICULTY_TIERS.forEach((t, i) => {
+    const bad = (msg) => { throw new Error(`Difficulty tier ${i + 1}: ${msg}`); };
+    if (t.stages[0] !== expect || t.stages[1] < t.stages[0]) bad(`must start at stage ${expect}`);
+    expect = t.stages[1] + 1;
+    for (const k of ['speed', 'soldierHp']) if (!num(t[k]) || t[k] <= 0) bad(`${k} must be a positive number`);
+    if (!Number.isInteger(t.maxWaves) || t.maxWaves < 1) bad('maxWaves must be an integer >= 1');
+    if (!num(t.overlap) || t.overlap < 0 || t.overlap >= 1) bad('overlap must be in [0, 1)');
+    if (!Array.isArray(t.downtime) || t.downtime.length !== 2 || !t.downtime.every(num) || t.downtime[0] > t.downtime[1]) bad('downtime must be [min, max]');
+  });
+  if (expect <= 30) throw new Error(`Difficulty tiers must cover stages up to 30 (they stop at ${expect - 1})`);
   stages.forEach((s, i) => {
     if (s.id !== i + 1) fail(s, `id must be ${i + 1} (stages are numbered in order)`);
     if (!s.name || !s.text) fail(s, 'name and text are required');
