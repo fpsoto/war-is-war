@@ -17,7 +17,9 @@ Works on desktop, tablets and phones (portrait and landscape).
 | `◀` `▶` or `A` `D` | Move the squad left / right |
 | `Space` / `Enter` | Confirm on menus |
 
-Firing is automatic. Every enemy that reaches your squad, or slips past it, costs health.
+Firing is automatic. Each soldier has its own health: an enemy that reaches the squad hurts the
+soldier it touches, and one that slips past hurts the soldier nearest to the gap. A soldier at
+zero health falls and the squad closes ranks. The stage is lost when the last soldier falls.
 
 ### Stages
 
@@ -36,7 +38,7 @@ Signs travel down both edges of the bridge. Shoot one until its bar is empty to 
 |---|---|
 | **+1 SOLDIER** | Another soldier joins the squad (max 8) |
 | **x2 FIRE RATE** | Double fire rate for 8 s |
-| **+30 HEALTH** | Restores health |
+| **+30% HEALTH** | Every living soldier recovers 30% of its health |
 | **PIERCE** | Bullets go through up to 4 enemies for 6 s |
 
 ## Running locally
