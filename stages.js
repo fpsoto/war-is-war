@@ -115,6 +115,36 @@ export const STAGES = [
       },
     ],
   },
+  // Stages 4-6 teach one new enemy at a time (docs/level-design.md §3): runners, then heavies,
+  // then both together. Each is split in waves so the new type gets a small first wave to read.
+  {
+    id: 4, name: 'Fast Approach', text: 'Runners sprint ahead of the line: drop them first',
+    squad: 3, pace: 0.9, fireInterval: 0.06, contactDamage: 4,
+    reward: { type: 'reloadSpeed', amount: 0.2 },
+    waves: [
+      { enemies: { soldier: 50, runner: 6 }, formation: { cols: 10, spacingX: 1.1, spacingZ: 1.6, startZ: -34 } },
+      { enemies: { soldier: 70, runner: 14 }, formation: { cols: 12, fullWidth: true, spacingZ: 1.3, startZ: -34 } },
+    ],
+  },
+  {
+    id: 5, name: 'Iron Wall', text: 'Armored heavies shrug off bullets: focus your fire',
+    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 4,
+    reward: { type: 'rifleUpgrade', damage: 0.15 },
+    waves: [
+      { enemies: { soldier: 60, heavy: 6 }, formation: { cols: 10, spacingX: 1.1, spacingZ: 1.5, startZ: -34 } },
+      { enemies: { soldier: 80, heavy: 14 }, formation: { cols: 12, fullWidth: true, spacingZ: 1.2, startZ: -34 } },
+    ],
+  },
+  {
+    id: 6, name: 'Broken Formation', text: 'Runners in front, heavies behind: watch both',
+    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 4,
+    reward: { type: 'grenade', charges: 1 },
+    waves: [
+      { enemies: { soldier: 50, runner: 10 }, formation: { cols: 12, fullWidth: true, spacingZ: 1.4, startZ: -34 } },
+      { enemies: { soldier: 60, runner: 10, heavy: 4 }, formation: { cols: 12, fullWidth: true, spacingZ: 1.2, startZ: -34 } },
+      { enemies: { soldier: 70, runner: 10, heavy: 6 }, formation: { cols: 14, fullWidth: true, spacingZ: 1.0, startZ: -34 } },
+    ],
+  },
 ];
 
 // Total enemies a stage brings across all its waves (bosses excluded).
