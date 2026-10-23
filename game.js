@@ -360,8 +360,10 @@ const player = {
   x: 0, targetX: 0, z: 0, fireT: 0, prevX: 0,
   size: 1, // living soldiers
   rapidT: 0, pierceT: 0, // timed power-ups (seconds left)
-  // weapon stats shared by the squad, rebuilt each stage from CFG + weaponMods
-  weapon: { magSize: CFG.magSize, reloadTime: CFG.reloadTime },
+  // Squad stats, rebuilt each stage from CFG + the saved upgrades (profile) + weaponMods.
+  weapon: { magSize: CFG.magSize, reloadTime: CFG.reloadTime, damage: CFG.bulletDamage, armorPierce: 0 },
+  soldierHp: CFG.soldierHp, // max health of each soldier
+  fireRateMul: 1,           // > 1 during a stage boosted by the previous stage's reward
 };
 // Persistent weapon modifiers (permanent upgrades from #17 will write here). Applied at stage
 // setup, before magazines are handed out, so the reload stagger uses the final magazine size.
@@ -1026,7 +1028,7 @@ function drawPanel(p) {
 }
 
 function squadInjured() {
-  for (let k = 0; k < player.size; k++) if (squad[k].hp < CFG.soldierHp) return true;
+  for (let k = 0; k < player.size; k++) if (squad[k].hp < player.soldierHp) return true;
   return false;
 }
 
@@ -1132,7 +1134,7 @@ function applyPowerUp(type) {
   } else if (type === 'heal') {
     // every living soldier recovers 30% of max health (docs/level-design.md §4)
     for (let k = 0; k < player.size; k++) {
-      squad[k].hp = Math.min(CFG.soldierHp, squad[k].hp + CFG.soldierHp * 0.3);
+      squad[k].hp = Math.min(player.soldierHp, squad[k].hp + player.soldierHp * 0.3);
     }
     showToast('+30% HEALTH', '#2cbf47');
   } else if (type === 'pierce') {
@@ -1226,8 +1228,9 @@ function updateBullets(dt) {
     }
     if (hit >= 0) {
       // armor blocks a fraction of every bullet's damage
-      const armor = TYPES[E.type[hit]].armor;
-      const dmg = CFG.bulletDamage * (1 - armor);
+      // armor-piercing rounds (a stage reward) make armor block proportionally less
+      const armor = TYPES[E.type[hit]].armor * (1 - player.weapon.armorPierce);
+      const dmg = player.weapon.damage * (1 - armor);
       // piercing rounds only keep flying when they actually kill the target;
       // otherwise the same tough enemy would be hit again next frame
       if (B.pierce[b] > 0 && E.hp[hit] <= dmg + 1e-6) B.pierce[b]--;
@@ -1311,6 +1314,7 @@ const ui = {
   stage: $('stageLabel'),
   squadBars: $('squadBars'), kills: $('kills'), hurt: $('hurt'),
   overlay: $('overlay'), title: $('ovTitle'), text: $('ovText'), btn: $('ovBtn'),
+  btn2: $('ovBtn2'), choices: $('ovChoices'),
   banner: $('banner'), bannerTitle: $('bannerTitle'), bannerText: $('bannerText'),
   squad: $('squadCount'), powers: $('powers'), toast: $('toast'),
 };
@@ -1383,7 +1387,7 @@ function updateHud() {
     const alive = k < player.size;
     bar.el.hidden = !alive;
     if (alive) {
-      const f = Math.max(0, squad[k].hp) / CFG.soldierHp;
+      const f = Math.max(0, squad[k].hp) / player.soldierHp;
       bar.fill.style.transform = `scaleX(${f})`;
       bar.hp.classList.toggle('low', f < 0.35);
     }
@@ -1446,7 +1450,7 @@ function fallSoldier(k) {
 // Brings soldier slot `player.size` to life at full health, at (x, z).
 function reviveSoldier(x, z) {
   const s = squad[player.size];
-  s.hp = CFG.soldierHp;
+  s.hp = player.soldierHp;
   s.dying = false;
   s.t = 0;
   s.px = x; s.pz = z;
@@ -1475,8 +1479,10 @@ function updateFallen(dt) {
   }
 }
 
-// carry: squad size brought in from the previous stage (earned soldiers are kept)
-function setupStage(idx, carry = 0) {
+// carry: squad size brought in from the previous stage (earned soldiers are kept).
+// boosted: apply (and consume) the temporary boost the previous stage's reward granted; only a
+// real stage start does this, not the backdrop laid out behind the menu.
+function setupStage(idx, carry = 0, boosted = false) {
   stageIdx = idx;
   const st = STAGES[idx];
   // difficulty: the tier's multipliers on top of the stage's own pace
@@ -1499,22 +1505,33 @@ function setupStage(idx, carry = 0) {
   player.x = player.targetX = player.prevX = 0;
   player.fireT = 0;
   player.rapidT = player.pierceT = 0;
+  // Squad stats from the saved upgrades. They are set before the soldiers are revived, so every
+  // soldier starts with the upgraded health and magazine.
+  player.weapon.damage = CFG.bulletDamage * (1 + profile.damage);
+  player.weapon.magSize = weaponMods.magSize ?? CFG.magSize;
+  player.weapon.reloadTime = (weaponMods.reloadTime ?? CFG.reloadTime) / (1 + profile.reload);
+  player.weapon.armorPierce = profile.armorPierce;
+  player.soldierHp = CFG.soldierHp * (1 + profile.durability);
+  player.fireRateMul = 1;
+  if (boosted && profile.nextBoost) {
+    player.fireRateMul = 1 + profile.nextBoost.fireRate;
+    profile.nextBoost = null;
+    saveProfile();
+  }
   // every stage starts with a healthy squad, placed straight in formation
-  const size = stageStartSize = Math.min(SQUAD_MAX, Math.max(st.squad, carry));
+  const size = stageStartSize = Math.min(SQUAD_MAX, Math.max(st.squad + profile.squad, carry));
   const layout = squadLayout(size);
   player.size = 0;
   for (const s of squad) {
     s.dying = false;
     s.group.visible = s.blob.visible = false;
   }
-  player.weapon.magSize = weaponMods.magSize ?? CFG.magSize;
-  player.weapon.reloadTime = weaponMods.reloadTime ?? CFG.reloadTime;
   for (const [ox, oz] of layout) reviveSoldier(player.x + ox, player.z + oz);
   // Stagger: each soldier starts at a different point of the fire-and-reload cycle, evenly spread
   // over the whole cycle (period P = magazine time + reload). With reloads spread like that they
   // can't all overlap while the reload is shorter than P, so the squad never goes silent at once.
   // Soldier k starts `off` seconds into its cycle: still firing with fewer rounds, or reloading.
-  const fi = st.fireInterval, mag = player.weapon.magSize, reload = player.weapon.reloadTime;
+  const fi = st.fireInterval / player.fireRateMul, mag = player.weapon.magSize, reload = player.weapon.reloadTime;
   const fireDur = mag * fi, period = fireDur + reload;
   for (let k = 1; k < player.size; k++) {
     const off = (period * k) / player.size;
@@ -1542,42 +1559,211 @@ function showBanner(title, text) {
   bannerTimer = setTimeout(() => ui.banner.classList.remove('on'), 2200);
 }
 
+// ---------- Progress, rewards and saving ----------
+// The profile is the whole save: campaign progress plus permanent upgrades. It lives in the
+// browser's localStorage, so it is per device and per browser. Rewards and upgrade choices are
+// granted once per stage (`claimed`), so replaying a stage can't stack them.
+const SAVE_KEY = 'warIsWar.save.v1';
+// After these stages the player picks 1 of 3 permanent upgrades (docs/level-design.md §4).
+const UPGRADE_CHOICE_AFTER = new Set([5, 10, 15, 20, 25]);
+// Permanent upgrades offered in the choice screen, and how much one pick adds.
+const UPGRADES = {
+  damage: { step: 0.10, title: '+10% DAMAGE', text: 'Every bullet hits harder' },
+  reload: { step: 0.10, title: '+10% RELOAD', text: 'Magazines refill faster' },
+  durability: { step: 0.15, title: '+15% DURABILITY', text: 'Every soldier has more health' },
+  squad: { step: 1, title: '+1 SOLDIER', text: 'Start every stage with one more soldier' },
+};
+
+function newProfile() {
+  return {
+    v: 1,
+    reached: 0,      // index of the furthest stage unlocked (CONTINUE starts there)
+    claimed: [],     // ids of stages whose reward (and upgrade choice) was already granted
+    damage: 0,       // permanent bonuses, as fractions (0.25 = +25%) except squad (soldiers)
+    reload: 0,
+    durability: 0,
+    squad: 0,
+    armorPierce: 0,  // share of enemy armor ignored
+    grenades: 0,     // stored for the abilities system (#22)
+    nextBoost: null, // { fireRate } granted for the next stage only
+  };
+}
+
+// Reads the save, keeping only known fields of the right type. A missing, corrupt or foreign
+// save (or blocked storage) silently starts a new game instead of breaking the page.
+function loadProfile() {
+  const p = newProfile();
+  try {
+    const saved = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+    if (!saved || saved.v !== 1) return p;
+    for (const k of ['reached', 'damage', 'reload', 'durability', 'squad', 'armorPierce', 'grenades']) {
+      if (typeof saved[k] === 'number' && Number.isFinite(saved[k]) && saved[k] >= 0) p[k] = saved[k];
+    }
+    if (Array.isArray(saved.claimed)) p.claimed = saved.claimed.filter(Number.isInteger);
+    if (saved.nextBoost && typeof saved.nextBoost.fireRate === 'number') p.nextBoost = { fireRate: saved.nextBoost.fireRate };
+    p.reached = Math.min(Math.floor(p.reached), STAGES.length - 1);
+  } catch { /* fall through to the fresh profile */ }
+  return p;
+}
+
+function saveProfile() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(profile)); } catch { /* storage blocked: play on unsaved */ }
+}
+
+let profile = loadProfile();
+
+const pct = (f) => `+${Math.round(f * 100)}%`;
+
+// Applies a stage's reward to the profile and returns the line shown on the cleared screen.
+function grantReward(r) {
+  switch (r.type) {
+    case 'fireRateBoost': profile.nextBoost = { fireRate: r.amount }; return `${pct(r.amount)} fire rate during the next stage`;
+    case 'armorPiercing': profile.armorPierce = Math.max(profile.armorPierce, 0.5); return 'Armor-piercing rounds: armor blocks half as much';
+    case 'reloadSpeed': profile.reload += r.amount; return `${pct(r.amount)} reload speed`;
+    case 'rifleUpgrade': profile.damage += r.damage; return `Rifle upgrade: ${pct(r.damage)} damage`;
+    case 'grenade': profile.grenades += r.charges; return `${r.charges} grenade${r.charges > 1 ? 's' : ''} stored`;
+    default: return '';
+  }
+}
+
+// Short summary of the permanent upgrades, for the start and cleared screens.
+function upgradesSummary() {
+  const parts = [];
+  if (profile.damage) parts.push(`${pct(profile.damage)} damage`);
+  if (profile.reload) parts.push(`${pct(profile.reload)} reload`);
+  if (profile.durability) parts.push(`${pct(profile.durability)} health`);
+  if (profile.squad) parts.push(`+${profile.squad} soldier${profile.squad > 1 ? 's' : ''}`);
+  if (profile.armorPierce) parts.push('armor-piercing');
+  return parts.join(' · ');
+}
+
 function startStage(idx, carry = 0) {
-  setupStage(idx, carry);
+  setupStage(idx, carry, true);
   state = 'play';
   ui.overlay.classList.add('hidden');
   const st = STAGES[idx];
   const squadText = player.size > 1 ? ` · your squad: ${player.size} soldiers` : '';
-  showBanner(stageTitle(idx), `${st.name} · ${st.text}${squadText}`);
+  const boostText = player.fireRateMul > 1 ? ` · ${pct(player.fireRateMul - 1)} fire rate` : '';
+  showBanner(stageTitle(idx), `${st.name} · ${st.text}${squadText}${boostText}`);
 }
 
-function showOverlay(title, text, btn, action) {
+// The overlay shows a title, a text, a main button and optionally a second button or a row of
+// choice cards. Enter/Space trigger the main button (nextAction), except while choosing.
+let secondAction = null;
+function showOverlay(title, text, btn, action, { btn2 = null, choices = null } = {}) {
   ui.title.textContent = title;
   ui.text.textContent = text;
-  ui.btn.textContent = btn;
-  nextAction = action;
+  ui.btn.textContent = btn || '';
+  ui.btn.classList.toggle('hidden', !btn);
+  nextAction = action || (() => {});
+  ui.btn2.classList.toggle('hidden', !btn2);
+  secondAction = btn2 ? btn2.action : null;
+  if (btn2) ui.btn2.textContent = btn2.label;
+  ui.choices.replaceChildren();
+  ui.choices.classList.toggle('hidden', !choices);
+  for (const c of choices || []) {
+    const b = document.createElement('button');
+    b.className = 'choice';
+    const strong = document.createElement('b');
+    strong.textContent = c.title;
+    const span = document.createElement('span');
+    span.textContent = c.text;
+    b.append(strong, span);
+    b.addEventListener('click', c.action);
+    ui.choices.appendChild(b);
+  }
   ui.overlay.classList.remove('hidden');
+}
+
+// Picks 3 different upgrades at random from the pool.
+function rollUpgrades() {
+  const keys = Object.keys(UPGRADES);
+  for (let i = keys.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [keys[i], keys[j]] = [keys[j], keys[i]];
+  }
+  return keys.slice(0, 3);
 }
 
 function endStage(won) {
   state = won ? 'win' : 'lose';
+  const st = STAGES[stageIdx];
   const last = stageIdx === STAGES.length - 1;
+  let rewardText = '';
+  let choose = false;
+  if (won) {
+    // first clear of this stage: grant its reward (and maybe an upgrade choice), unlock the next
+    if (!profile.claimed.includes(st.id)) {
+      profile.claimed.push(st.id);
+      rewardText = grantReward(st.reward);
+      choose = UPGRADE_CHOICE_AFTER.has(st.id);
+    }
+    profile.reached = Math.max(profile.reached, Math.min(stageIdx + 1, STAGES.length - 1));
+    saveProfile();
+  }
+  const carry = player.size;
+  const showCleared = () => {
+    if (last) {
+      showOverlay('TOTAL VICTORY!', ['You held the bridge through every stage', rewardText].filter(Boolean).join(' · '),
+        'PLAY AGAIN', () => startStage(0));
+      return;
+    }
+    const next = STAGES[stageIdx + 1];
+    const lines = [`${kills} kills`];
+    if (rewardText) lines.push(`Reward: ${rewardText}`);
+    lines.push(`Next: ${next.name}, ${next.text}`);
+    showOverlay(`${stageTitle(stageIdx)} CLEARED!`, lines.join(' · '), 'NEXT STAGE', () => startStage(stageIdx + 1, carry));
+  };
   // short delay so the final death / explosion is visible before the overlay
   setTimeout(() => {
     if (!won) {
       showOverlay('DEFEAT', `The horde overran you in ${stageTitle(stageIdx).toLowerCase()} · ${kills} kills`,
         'RETRY', () => startStage(stageIdx, stageStartSize));
-    } else if (last) {
-      showOverlay('TOTAL VICTORY!', 'You held the bridge through every stage', 'PLAY AGAIN', () => startStage(0));
+    } else if (choose) {
+      const intro = rewardText ? `Reward: ${rewardText}. ` : '';
+      showOverlay('CHOOSE AN UPGRADE', `${intro}Pick one permanent upgrade`, null, null, {
+        choices: rollUpgrades().map((k) => ({
+          title: UPGRADES[k].title,
+          text: UPGRADES[k].text,
+          action: () => { profile[k] += UPGRADES[k].step; saveProfile(); showCleared(); },
+        })),
+      });
     } else {
-      const next = STAGES[stageIdx + 1];
-      showOverlay(`${stageTitle(stageIdx)} CLEARED!`, `${kills} kills · next: ${next.name}, ${next.text}`,
-        'NEXT STAGE', () => startStage(stageIdx + 1, player.size));
+      showCleared();
     }
   }, won ? 800 : 900);
 }
 
+// Start screen: CONTINUE from the furthest stage when there is progress, plus NEW GAME, which
+// asks for a second tap before wiping the save.
+let resetArmed = 0;
+function showStartScreen() {
+  const intro = 'Stop the horde and shoot the signs on the edges to get reinforcements';
+  if (profile.reached > 0) {
+    const ups = upgradesSummary();
+    showOverlay('WAR IS WAR', ups ? `${intro} · Upgrades: ${ups}` : intro,
+      `CONTINUE · ${stageTitle(profile.reached)}`, () => startStage(profile.reached), {
+        btn2: {
+          label: 'NEW GAME',
+          action: () => {
+            if (Date.now() - resetArmed > 3000) {
+              resetArmed = Date.now();
+              ui.btn2.textContent = 'TAP AGAIN TO ERASE PROGRESS';
+              return;
+            }
+            profile = newProfile();
+            saveProfile();
+            startStage(0);
+          },
+        },
+      });
+  } else {
+    showOverlay('WAR IS WAR', intro, 'PLAY', () => startStage(0));
+  }
+}
+
 ui.btn.addEventListener('click', () => nextAction());
+ui.btn2.addEventListener('click', () => secondAction && secondAction());
 
 // ---------- Controls ----------
 const keys = new Set();
@@ -1684,7 +1870,7 @@ function updatePlayer(dt) {
         fire(s, ox * 0.05);
         if (--s.ammo <= 0) s.reloadT = player.weapon.reloadTime;
       });
-      player.fireT += st.fireInterval * (player.rapidT > 0 ? 0.5 : 1);
+      player.fireT += (st.fireInterval / player.fireRateMul) * (player.rapidT > 0 ? 0.5 : 1);
     }
   }
 }
@@ -1745,9 +1931,13 @@ fetch('version.json', { cache: 'no-store' })
 const params = new URLSearchParams(location.search);
 // (?level=N still works: it was the parameter's name before stages became data)
 const stageParam = params.get('stage') ?? params.get('level');
-const startIdx = THREE.MathUtils.clamp((parseInt(stageParam, 10) || 1) - 1, 0, STAGES.length - 1);
+// without ?stage, the backdrop behind the menu (and ?play) is the furthest stage reached
+const startIdx = stageParam !== null
+  ? THREE.MathUtils.clamp((parseInt(stageParam, 10) || 1) - 1, 0, STAGES.length - 1)
+  : profile.reached;
 setupStage(startIdx);
 if (params.has('play') || stageParam !== null) startStage(startIdx);
+else showStartScreen();
 // ?debug exposes the live state to the console and to automated checks
 if (params.has('debug')) {
   window.__warIsWar = {
@@ -1760,6 +1950,21 @@ if (params.has('debug')) {
     tiers: DIFFICULTY_TIERS,
     cfg: CFG, // mutable, for tuning experiments
     get mods() { return { tier: stageMods.tier.stages, speed: stageMods.speed, soldierHp: stageMods.soldierHp }; },
+    // save and progression
+    get profile() { return JSON.parse(JSON.stringify(profile)); },
+    get weapon() { return { ...player.weapon, soldierHp: player.soldierHp, fireRateMul: player.fireRateMul }; },
+    get overlay() {
+      return {
+        visible: !ui.overlay.classList.contains('hidden'), title: ui.title.textContent, text: ui.text.textContent,
+        btn: ui.btn.classList.contains('hidden') ? null : ui.btn.textContent,
+        btn2: ui.btn2.classList.contains('hidden') ? null : ui.btn2.textContent,
+        choices: [...ui.choices.children].map((c) => c.querySelector('b').textContent),
+      };
+    },
+    clickMain() { nextAction(); },
+    clickSecond() { secondAction && secondAction(); },
+    choose(n) { ui.choices.children[n].click(); },
+    reloadProfile() { profile = loadProfile(); },
     // living soldiers' health and positions, in squad order
     get squad() {
       return squad.slice(0, player.size).map((s) => ({

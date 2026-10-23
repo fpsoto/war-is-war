@@ -32,6 +32,16 @@ zero health falls and the squad closes ranks. The stage is lost when the last so
 
 Clearing a stage takes you to the next one, and you keep any soldiers you recruited.
 
+### Rewards, upgrades and saving
+
+The first time you clear a stage you get its reward: a fire-rate boost for the next stage,
+armor-piercing rounds, faster reloads, a rifle upgrade or grenades. After stage 5 (and every five
+stages after it) you also pick one of three permanent upgrades: damage, reload speed, soldier
+health or an extra starting soldier.
+
+Progress and upgrades are saved in your browser. The start screen offers **CONTINUE** from the
+furthest stage you reached and **NEW GAME**, which asks for a second tap before erasing progress.
+
 ### Power-ups
 
 Signs travel down both edges of the bridge. Shoot one until its bar is empty to collect it:
