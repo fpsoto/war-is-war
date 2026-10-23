@@ -77,7 +77,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           mkdir -p _site
-          cp index.html game.js .nojekyll _site/
+          cp index.html ./*.js .nojekyll _site/
           printf '{"version":"%s"}\n' "$VERSION" > _site/version.json
           reported="$(jq -r .version _site/version.json)"
           if [ "$reported" != "$VERSION" ]; then
