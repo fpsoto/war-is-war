@@ -29,7 +29,7 @@ const CFG = {
   bulletRange: 95,
   bulletDamage: 1,        // before armor; weapon upgrades (#17) raise it
   spread: 0.03,           // random aim jitter in radians
-  playerHp: 100,
+  soldierHp: 100,         // health of each squad member (durability upgrades in #17 raise it)
   funnelDist: 14,         // at this distance the formation breaks and rushes the squad
 };
 const HALF_W = CFG.roadWidth / 2;
@@ -332,19 +332,31 @@ function squadLayout(n) {
   return out;
 }
 // All soldiers are built up front and toggled visible, so gaining one never stalls a frame.
+//
+// Squad bookkeeping: the living soldiers are always squad[0 .. player.size-1], in layout order.
+// When one falls, it is swapped with the last living soldier and player.size shrinks; the fallen
+// one plays its death animation from the tail of the array. Each soldier eases towards its layout
+// slot, so the formation visibly closes the gap instead of teleporting.
 const squad = [];
 for (let i = 0; i < SQUAD_MAX; i++) {
   const s = buildSoldier();
   s.group.visible = s.blob.visible = false;
+  s.hp = CFG.soldierHp;
+  s.dying = false; // playing the fall animation
+  s.t = 0;         // seconds since it fell
+  s.px = 0; s.pz = 0; // current position (eases towards the layout slot)
   scene.add(s.group);
   squad.push(s);
 }
 
 const player = {
-  x: 0, targetX: 0, z: 0, hp: CFG.playerHp, fireT: 0, prevX: 0, size: 1,
+  x: 0, targetX: 0, z: 0, fireT: 0, prevX: 0,
+  size: 1, // living soldiers
   rapidT: 0, pierceT: 0, // timed power-ups (seconds left)
 };
-const squadPos = []; // [{x,z}] world positions of the active soldiers, rebuilt every frame
+// World positions of the living soldiers, rewritten every frame. Preallocated: the enemy loop
+// reads it hundreds of times per frame.
+const squadPos = Array.from({ length: SQUAD_MAX }, () => ({ x: 0, z: 0 }));
 
 // ---------- Enemies (one InstancedMesh per body part) ----------
 // Struct-of-arrays: enemy i is E.x[i], E.z[i], ... Typed arrays keep the hot loops
@@ -601,12 +613,12 @@ function setPart(mesh, i, px, py, pz, rx) {
   mesh.setMatrixAt(i, _mOut);
 }
 
-// x of the squad member closest to x (enemies home in on the nearest soldier)
-function nearestSquadX(x) {
-  let best = squadPos[0].x, bd = Infinity;
-  for (const p of squadPos) {
-    const d = Math.abs(p.x - x);
-    if (d < bd) { bd = d; best = p.x; }
+// Index of the living soldier closest to x (enemies home in on it, leakers hit it).
+function nearestSoldier(x) {
+  let best = 0, bd = Infinity;
+  for (let k = 0; k < player.size; k++) {
+    const d = Math.abs(squadPos[k].x - x);
+    if (d < bd) { bd = d; best = k; }
   }
   return best;
 }
@@ -642,14 +654,14 @@ function updateEnemies(dt, playing) {
     const s = E.state[i];
     if (s === 0) continue;
     if (s === 1) {
-      if (playing) {
+      if (playing && player.size > 0) {
         // Funnel: march straight while far, then steer harder towards the nearest
         // soldier as the distance shrinks. This drags the crowd into the line of fire.
         const distToPlayer = player.z - E.z[i];
         let vx = 0;
         if (distToPlayer < CFG.funnelDist) {
           const pull = 1 - Math.max(0, distToPlayer) / CFG.funnelDist; // 0 → 1 while approaching
-          const tx = nearestSquadX(E.x[i]);
+          const tx = squadPos[nearestSoldier(E.x[i])].x;
           vx = THREE.MathUtils.clamp((tx - E.x[i]) * 1.2, -2.2, 2.2) * pull;
         }
         E.vx[i] += (vx - E.vx[i]) * Math.min(1, dt * 4); // smoothed steering
@@ -659,15 +671,19 @@ function updateEnemies(dt, playing) {
         E.x[i] = THREE.MathUtils.clamp(E.x[i], -HALF_W + 0.4, HALF_W - 0.4);
         E.yaw[i] = Math.atan2(E.vx[i], E.speed[i]) * 0.7;
 
-        // contact with any soldier, or slipping past the squad, costs HP
-        let touched = E.z[i] > player.z + 1.5;
-        for (const p of squadPos) {
-          const dx = E.x[i] - p.x, dz = E.z[i] - p.z;
-          if (dx * dx + dz * dz < 0.8 * 0.8) { touched = true; break; }
+        // Contact damages the soldier that was touched. An enemy that slips past the squad
+        // without touching anyone damages the soldier nearest to where it got through.
+        let target = -1;
+        for (let k = 0; k < player.size; k++) {
+          const dx = E.x[i] - squadPos[k].x, dz = E.z[i] - squadPos[k].z;
+          if (dx * dx + dz * dz < 0.8 * 0.8) { target = k; break; }
         }
-        if (touched) {
-          hurtPlayer(st.contactDamage * TYPES[E.type[i]].contact);
+        if (target < 0 && E.z[i] > player.z + 1.5) target = nearestSoldier(E.x[i]);
+        if (target >= 0) {
+          const dmg = st.contactDamage * TYPES[E.type[i]].contact;
           killEnemy(i, false);
+          damageSoldier(target, dmg);
+          if (player.size === 0) break; // squad wiped: indices into squadPos are stale now
         }
       }
       E.phase[i] += dt * E.speed[i] * 3.6;
@@ -876,7 +892,8 @@ function updateBoss(dt, playing) {
       boss.z += boss.speed * dt;
       const reach = 0.6 * boss.scale;
       if (boss.z + reach > player.z - 0.4) {
-        hurtPlayer(CFG.playerHp); // the giant crushes the squad: instant defeat
+        // the giant crushes the whole squad: instant defeat (#20 replaces this with real attacks)
+        while (player.size > 0) damageSoldier(0, Infinity);
         shake = 0.8;
       }
     }
@@ -929,7 +946,7 @@ function hitBoss(x, y, z) {
 const POWERUPS = {
   soldier: { label: '+1', sub: 'SOLDIER', bg: '#2f6fe0', edge: 0x1b3f8f, ink: '#ffffff', hits: 6, weight: 45 },
   rapid:   { label: 'x2', sub: 'FIRE RATE', bg: '#ffc928', edge: 0xc79a12, ink: '#4a2f00', hits: 8, weight: 20 },
-  heal:    { label: '+30', sub: 'HEALTH', bg: '#2cbf47', edge: 0x1c8a32, ink: '#ffffff', hits: 5, weight: 15 },
+  heal:    { label: '+30%', sub: 'HEALTH', bg: '#2cbf47', edge: 0x1c8a32, ink: '#ffffff', hits: 5, weight: 15 },
   pierce:  { label: '>>>', sub: 'PIERCE', bg: '#9b2fd6', edge: 0x5e1385, ink: '#ffffff', hits: 10, weight: 20 },
 };
 const PANEL = { w: 2.3, h: 1.4, x: HALF_W - 0.2, speed: 3.6, spawnZ: -95, hitHalfW: 1.15 };
@@ -964,10 +981,15 @@ function drawPanel(p) {
   p.tex.needsUpdate = true;
 }
 
+function squadInjured() {
+  for (let k = 0; k < player.size; k++) if (squad[k].hp < CFG.soldierHp) return true;
+  return false;
+}
+
 // Weighted random pick, skipping power-ups that would be useless right now.
 function pickPowerType() {
   const options = Object.entries(POWERUPS).filter(([k]) =>
-    !(k === 'soldier' && player.size >= SQUAD_MAX) && !(k === 'heal' && player.hp >= CFG.playerHp));
+    !(k === 'soldier' && player.size >= SQUAD_MAX) && !(k === 'heal' && !squadInjured()));
   let r = Math.random() * options.reduce((a, [, d]) => a + d.weight, 0);
   for (const [k, d] of options) { r -= d.weight; if (r <= 0) return k; }
   return options[0][0];
@@ -1052,19 +1074,23 @@ function hitPanel(p) {
 }
 
 function applyPowerUp(type) {
+  // bullets keep flying after a stage ends; a panel they finish must not revive a lost squad
+  if (state !== 'play') return;
   if (type === 'soldier') {
     if (player.size < SQUAD_MAX) {
-      player.size++;
-      const s = squad[player.size - 1];
-      s.group.visible = s.blob.visible = true;
+      // the recruit runs in from behind the squad and eases into its slot
+      reviveSoldier(player.x, player.z + 2.5);
       showToast('+1 SOLDIER', '#4f8cff');
     }
   } else if (type === 'rapid') {
     player.rapidT = PANEL_DURATION.rapid;
     showToast('FIRE RATE x2!', '#ffc928');
   } else if (type === 'heal') {
-    player.hp = Math.min(CFG.playerHp, player.hp + 30);
-    showToast('+30 HEALTH', '#2cbf47');
+    // every living soldier recovers 30% of max health (docs/level-design.md §4)
+    for (let k = 0; k < player.size; k++) {
+      squad[k].hp = Math.min(CFG.soldierHp, squad[k].hp + CFG.soldierHp * 0.3);
+    }
+    showToast('+30% HEALTH', '#2cbf47');
   } else if (type === 'pierce') {
     player.pierceT = PANEL_DURATION.pierce;
     showToast('PIERCING ROUNDS!', '#c06bff');
@@ -1239,7 +1265,7 @@ const ui = {
   enemyFill: $('enemyFill'), enemyCount: $('enemyCount'),
   bossBar: $('bossBar'), bossFill: $('bossFill'),
   stage: $('stageLabel'),
-  hpFill: $('hpFill'), kills: $('kills'), hurt: $('hurt'),
+  squadBars: $('squadBars'), kills: $('kills'), hurt: $('hurt'),
   overlay: $('overlay'), title: $('ovTitle'), text: $('ovText'), btn: $('ovBtn'),
   banner: $('banner'), bannerTitle: $('bannerTitle'), bannerText: $('bannerText'),
   squad: $('squadCount'), powers: $('powers'), toast: $('toast'),
@@ -1250,6 +1276,16 @@ let kills = 0, remaining = 0, shake = 0, time = 0;
 let nextAction = () => startStage(0); // what the overlay button does
 
 const stageTitle = (idx) => `STAGE ${STAGES[idx].id}`;
+
+// Squad health HUD: SQUAD_MAX mini bars built once; updateHud shows one per living soldier.
+const squadBarEls = Array.from({ length: SQUAD_MAX }, () => {
+  const el = document.createElement('div');
+  el.className = 'bar hp';
+  const fill = document.createElement('i');
+  el.appendChild(fill);
+  ui.squadBars.appendChild(el);
+  return { el, fill };
+});
 
 function showToast(text, color) {
   const el = document.createElement('div');
@@ -1277,7 +1313,17 @@ function updateHud() {
   ui.enemyCount.textContent = remaining;
   ui.bossBar.classList.toggle('hidden', !boss.active || boss.state === 0);
   ui.bossFill.style.transform = `scaleX(${Math.max(0, boss.hp) / boss.maxHp})`;
-  ui.hpFill.style.transform = `scaleX(${Math.min(1, Math.max(0, player.hp) / CFG.playerHp)})`;
+  // one mini bar per living soldier, in squad order
+  for (let k = 0; k < SQUAD_MAX; k++) {
+    const bar = squadBarEls[k];
+    const alive = k < player.size;
+    bar.el.hidden = !alive;
+    if (alive) {
+      const f = Math.max(0, squad[k].hp) / CFG.soldierHp;
+      bar.fill.style.transform = `scaleX(${f})`;
+      bar.el.classList.toggle('low', f < 0.35);
+    }
+  }
   ui.kills.textContent = `${kills} kills`;
   ui.stage.textContent = `${stageTitle(stageIdx)} / ${STAGES.length}`;
 }
@@ -1301,15 +1347,65 @@ function checkWin() {
 }
 
 let hurtTimer = 0;
-function hurtPlayer(dmg) {
-  if (state !== 'play') return;
-  player.hp -= dmg;
+// Damages living soldier k (an index into squad[0 .. player.size-1]).
+function damageSoldier(k, dmg) {
+  if (state !== 'play' || k >= player.size) return;
+  const s = squad[k];
+  s.hp -= dmg;
   shake = Math.max(shake, 0.35);
   ui.hurt.classList.add('on');
   clearTimeout(hurtTimer);
   hurtTimer = setTimeout(() => ui.hurt.classList.remove('on'), 90);
+  spawnParticles(s.px, 1.2, s.pz, 5, 0xc0392b, 3);
+  if (s.hp <= 0) fallSoldier(k);
   updateHud();
-  if (player.hp <= 0) endStage(false);
+  if (player.size === 0) endStage(false);
+}
+
+// Soldier k falls: swap it with the last living soldier so the living ones stay contiguous,
+// then shrink the squad. The fallen soldier animates from the tail (see updateFallen).
+function fallSoldier(k) {
+  const last = player.size - 1;
+  const fallen = squad[k];
+  squad[k] = squad[last];
+  squad[last] = fallen;
+  // keep squadPos aligned with the swap until updatePlayer rewrites it next frame
+  const p = squadPos[k]; squadPos[k] = squadPos[last]; squadPos[last] = p;
+  player.size--;
+  fallen.dying = true;
+  fallen.t = 0;
+  fallen.flash.visible = false;
+  spawnParticles(fallen.px, 1.0, fallen.pz, 14, 0x2f5fd0, 4);
+  if (player.size > 0) showToast('SOLDIER DOWN', '#ff6b5e');
+}
+
+// Brings soldier slot `player.size` to life at full health, at (x, z).
+function reviveSoldier(x, z) {
+  const s = squad[player.size];
+  s.hp = CFG.soldierHp;
+  s.dying = false;
+  s.t = 0;
+  s.px = x; s.pz = z;
+  s.group.rotation.set(0, 0, 0);
+  s.group.position.set(x, 0, z);
+  s.group.visible = s.blob.visible = true;
+  player.size++;
+}
+
+// Death animation of fallen soldiers: tip backwards (they face -z, so +x pitch), lie still,
+// sink, then hide.
+function updateFallen(dt) {
+  for (let k = player.size; k < SQUAD_MAX; k++) {
+    const s = squad[k];
+    if (!s.dying) continue;
+    s.t += dt;
+    s.group.rotation.x = Math.min(s.t / 0.35, 1) * Math.PI / 2;
+    s.group.position.y = -Math.max(0, s.t - 1.0) * 1.2;
+    if (s.t > 1.8) {
+      s.dying = false;
+      s.group.visible = s.blob.visible = false;
+    }
+  }
 }
 
 // carry: squad size brought in from the previous stage (earned soldiers are kept)
@@ -1328,13 +1424,17 @@ function setupStage(idx, carry = 0) {
   B.on.fill(0);
   PT.life.fill(0);
   player.x = player.targetX = player.prevX = 0;
-  player.hp = CFG.playerHp;
   player.fireT = 0;
-  player.size = stageStartSize = Math.min(SQUAD_MAX, Math.max(st.squad, carry));
   player.rapidT = player.pierceT = 0;
-  squad.forEach((s, k) => {
-    s.group.visible = s.blob.visible = k < player.size;
-  });
+  // every stage starts with a healthy squad, placed straight in formation
+  const size = stageStartSize = Math.min(SQUAD_MAX, Math.max(st.squad, carry));
+  const layout = squadLayout(size);
+  player.size = 0;
+  for (const s of squad) {
+    s.dying = false;
+    s.group.visible = s.blob.visible = false;
+  }
+  for (const [ox, oz] of layout) reviveSoldier(player.x + ox, player.z + oz);
   clearPanels();
   // a few panels already on their way so the edges are populated from the start
   for (const z of [-24, -50, -75]) spawnPanel(z);
@@ -1422,7 +1522,7 @@ function updatePlayer(dt) {
   const playing = state === 'play';
   const st = STAGES[stageIdx];
   const layout = squadLayout(player.size);
-  const halfSpan = Math.max(...layout.map(([ox]) => Math.abs(ox)));
+  const halfSpan = layout.length ? Math.max(...layout.map(([ox]) => Math.abs(ox))) : 0;
   if (playing) {
     player.rapidT = Math.max(0, player.rapidT - dt);
     player.pierceT = Math.max(0, player.pierceT - dt);
@@ -1441,16 +1541,22 @@ function updatePlayer(dt) {
 
   const vel = (player.x - player.prevX) / Math.max(dt, 1e-4);
   const moveAmt = Math.min(1, Math.abs(vel) / 5);
-  squadPos.length = 0;
 
   layout.forEach(([ox, oz], k) => {
     const s = squad[k];
-    const x = player.x + ox, z = player.z + oz;
-    squadPos.push({ x, z });
+    // ease towards the layout slot: closes gaps left by fallen soldiers and walks recruits in
+    const tx = player.x + ox, tz = player.z + oz;
+    const ease = Math.min(1, dt * 10);
+    s.px += (tx - s.px) * ease;
+    s.pz += (tz - s.pz) * ease;
+    squadPos[k].x = s.px;
+    squadPos[k].z = s.pz;
+    // a soldier still walking to its slot animates its legs even if the squad stands still
+    const moving = Math.max(moveAmt, Math.min(1, Math.hypot(tx - s.px, tz - s.pz) * 3));
     const t = time * 14 + k * 1.3; // per-soldier phase offset so they don't step in unison
-    s.group.position.set(x, Math.abs(Math.sin(t)) * 0.05 * moveAmt, z);
+    s.group.position.set(s.px, Math.abs(Math.sin(t)) * 0.05 * moving, s.pz);
     s.group.rotation.z = THREE.MathUtils.lerp(s.group.rotation.z, -vel * 0.02, 0.2); // lean into the strafe
-    const legSwing = Math.sin(t) * 0.6 * moveAmt;
+    const legSwing = Math.sin(t) * 0.6 * moving;
     s.legs[0].rotation.x = legSwing;
     s.legs[1].rotation.x = -legSwing;
     s.recoil = Math.max(0, s.recoil - dt * 18);
@@ -1461,8 +1567,9 @@ function updatePlayer(dt) {
       s.flash.scale.setScalar(rand(0.6, 1.1));
       s.flash.material.rotation = rand(0, Math.PI);
     }
-    s.blob.position.set(x, 0.01, z);
+    s.blob.position.set(s.px, 0.01, s.pz);
   });
+  updateFallen(dt);
 
   if (playing) {
     // Fixed-interval firing with an accumulator: a slow frame fires several volleys
@@ -1542,6 +1649,10 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    // living soldiers' health and positions, in squad order
+    get squad() { return squad.slice(0, player.size).map((s) => ({ hp: Math.round(s.hp), x: +s.px.toFixed(2), z: +s.pz.toFixed(2) })); },
+    get fallen() { return squad.slice(player.size).filter((s) => s.dying).length; },
+    power(type) { applyPowerUp(type); },
     // per enemy type: how many are alive and their mean z (larger z = closer to the squad)
     typeStats() {
       const out = {};
