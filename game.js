@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { STAGES, ENEMY_TYPES, BOSS_TYPES, stageEnemyTotal, validateStages } from './stages.js';
+import { STAGES, ENEMY_TYPES, BOSS_TYPES, DIFFICULTY_TIERS, tierFor, stageEnemyTotal, validateStages } from './stages.js';
 
 /*
  * War is War — a 3D horde shooter built with Three.js.
@@ -24,7 +24,6 @@ const CFG = {
   // more enemies than this in total; the extra rows wait in the reinforcement queue.
   maxActiveEnemies: 520,
   reinforcementZ: -80,    // where queued rows enter the bridge (hidden by the fog)
-  waveDowntime: 6,        // default seconds between waves (stages can override per wave)
   bulletSpeed: 55,
   bulletRange: 95,
   bulletDamage: 1,        // before armor; weapon upgrades (#17) raise it
@@ -467,18 +466,25 @@ for (let i = 0; i < MAX_E; i++) {
 let armColorsDirty = false; // arm colors only change on spawn, so they're uploaded only then
 
 // ---------- Stage manager and wave spawner ----------
-// A stage (stages.js) is a list of waves. Wave 1 is laid out when the stage is set up; each later
-// wave starts once the previous one is down to `whenRemaining` enemies, after `downtime` seconds.
-// Rows that don't fit under the active-enemy cap wait in a queue and enter at the far end of the
-// bridge as slots free up.
+// A stage (stages.js) is a list of waves. Wave 1 is laid out when the stage is set up. Each later
+// wave starts once the previous one is thin enough (its own `whenRemaining`, or the tier's
+// `overlap` share of its size) and fewer than the tier's `maxWaves` waves are on the bridge, after
+// a downtime (its own, or a random pick in the tier's range). Rows that don't fit under the
+// active-enemy cap wait in a queue and enter at the far end of the bridge as slots free up.
 const W = {
   next: 0,      // index of the next wave to start
   timer: 0,     // downtime accumulated towards the next wave
+  wait: -1,     // downtime picked for the next wave once its trigger is met (-1 = not yet)
   queue: [],    // reinforcement rows: { xs, types, wave, phase, interval }
   rowTimer: 0,  // seconds until the next queued row may enter
   alive: [],    // per wave: enemies still alive or queued
+  size: [],     // per wave: enemies it brought
 };
 let stageTotal = 0; // enemies the whole stage brings, across all waves (bosses excluded)
+
+// The current stage's difficulty: its tier (stages.js) combined with the stage's own pace.
+// Set once in setupStage so the hot paths read plain numbers.
+const stageMods = { tier: DIFFICULTY_TIERS[0], speed: 1, soldierHp: 1 };
 
 function spawnEnemy(type, x, z, wave, phase) {
   const i = allocEnemy();
@@ -490,10 +496,11 @@ function spawnEnemy(type, x, z, wave, phase) {
   E.z[i] = z;
   E.vx[i] = 0;
   // same speed for every enemy of a type keeps its part of the formation intact
-  E.speed[i] = t.speed * STAGES[stageIdx].pace;
+  E.speed[i] = t.speed * stageMods.speed;
   E.phase[i] = phase;
   E.scale[i] = t.scale * rand(0.95, 1.05);
-  E.hp[i] = t.hp;
+  // the tier's health multiplier applies to the basic soldier only (docs/level-design.md §5)
+  E.hp[i] = type === 'soldier' ? t.hp * stageMods.soldierHp : t.hp;
   E.state[i] = 1;
   E.t[i] = 0;
   E.flash[i] = 0;
@@ -550,8 +557,9 @@ function startWave(w) {
   const rowsNeeded = Math.ceil(roster.length / cols);
   const bossZ = f.startZ - (rowsNeeded * f.spacingZ) / 2 - 1;
   // time for the formation to advance one row: queued rows enter at this rhythm to keep spacing
-  const interval = f.spacingZ / (ENEMY_TYPES.soldier.speed * st.pace);
+  const interval = f.spacingZ / (ENEMY_TYPES.soldier.speed * stageMods.speed);
   W.alive[w] = roster.length;
+  W.size[w] = roster.length;
 
   let n = 0, queuing = false;
   for (let row = 0; n < roster.length; row++) {
@@ -574,7 +582,7 @@ function startWave(w) {
       W.queue.push({ xs, types, wave: w, phase, interval });
     }
   }
-  if (wave.boss) spawnBoss(wave.boss, bossZ, st.pace);
+  if (wave.boss) spawnBoss(wave.boss, bossZ, stageMods.speed);
 }
 
 function updateWaves(dt) {
@@ -591,16 +599,26 @@ function updateWaves(dt) {
     W.rowTimer = r.interval;
   }
 
-  // Next wave: wait until the previous wave is thin enough, then for the downtime.
+  // Next wave: wait until the previous wave is thin enough and the bridge has room for another
+  // wave, then for the downtime.
   if (W.next < st.waves.length) {
     const wave = st.waves[W.next];
-    if (W.alive[W.next - 1] <= (wave.whenRemaining ?? 0)) {
+    const tier = stageMods.tier;
+    const prev = W.next - 1;
+    // with a single wave allowed at a time, "thin enough" means fully cleared
+    const threshold = wave.whenRemaining ?? (tier.maxWaves > 1 ? Math.floor(W.size[prev] * tier.overlap) : 0);
+    let activeWaves = 0;
+    for (let w = 0; w < W.next; w++) if (W.alive[w] > 0) activeWaves++;
+    if (W.alive[prev] <= threshold && activeWaves < tier.maxWaves) {
+      // pick the downtime once, when the trigger is first met
+      if (W.wait < 0) W.wait = wave.downtime ?? rand(tier.downtime[0], tier.downtime[1]);
       W.timer += dt;
-      if (W.timer >= (wave.downtime ?? CFG.waveDowntime)) {
+      if (W.timer >= W.wait) {
         startWave(W.next);
         W.next++;
         W.timer = 0;
-        showBanner(`WAVE ${W.next}`, `${W.alive[W.next - 1]} enemies incoming`);
+        W.wait = -1;
+        showBanner(`WAVE ${W.next}`, `${W.size[W.next - 1]} enemies incoming`);
       }
     }
   }
@@ -869,7 +887,7 @@ scene.add(giant.group);
 // state: 0 inactive, 1 alive, 2 dying
 const boss = { active: false, state: 0, hp: 0, maxHp: 1, x: 0, z: 0, speed: 1, phase: 0, flash: 0, t: 0, scale: 1, lastStep: 0 };
 
-// def is a wave's boss entry ({ type, gap }); pace is the stage's speed multiplier.
+// def is a wave's boss entry ({ type, gap }); pace is the stage's speed multiplier (stage pace × tier).
 function spawnBoss(def, z, pace) {
   const type = BOSS_TYPES[def.type];
   boss.active = true;
@@ -1445,11 +1463,17 @@ function updateFallen(dt) {
 function setupStage(idx, carry = 0) {
   stageIdx = idx;
   const st = STAGES[idx];
+  // difficulty: the tier's multipliers on top of the stage's own pace
+  stageMods.tier = tierFor(st.id);
+  stageMods.speed = st.pace * stageMods.tier.speed;
+  stageMods.soldierHp = stageMods.tier.soldierHp;
   resetEnemyPool();
   hideBoss();
   W.queue.length = 0;
   W.alive.length = 0;
+  W.size.length = 0;
   W.timer = 0;
+  W.wait = -1;
   W.rowTimer = 0;
   startWave(0); // wave 1 is on the bridge from the start (it shows behind the menu too)
   W.next = 1;
@@ -1716,6 +1740,9 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    // difficulty tiers (mutable, for checks) and the values applied to the current stage
+    tiers: DIFFICULTY_TIERS,
+    get mods() { return { tier: stageMods.tier.stages, speed: stageMods.speed, soldierHp: stageMods.soldierHp }; },
     // living soldiers' health and positions, in squad order
     get squad() {
       return squad.slice(0, player.size).map((s) => ({

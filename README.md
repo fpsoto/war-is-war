@@ -78,9 +78,10 @@ docs/level-design.md   the 30-stage campaign design
 
 - `stages.js`: enemy and boss stats, and every stage as data. A stage lists its waves (enemy counts
   per type, formation, boss, downtime, and when the next wave starts), plus the starting squad, pace,
-  fire rate, contact damage and reward.
+  fire rate, contact damage and reward. `DIFFICULTY_TIERS` scales every stage in a range of the
+  campaign: enemy speed, basic soldier HP, how many waves may overlap and the downtime between waves.
 - `CFG` at the top of `game.js`: soldier health, bullet damage, magazine size and reload time, road size, the active-enemy cap, the reinforcement entry point,
-  the default wave downtime, bullet speed and range, player health, and the distance at which the
+  bullet speed and range, player health, and the distance at which the
   horde breaks formation.
 - `POWERUPS` in `game.js`: label, colours, hits needed and spawn weight of each sign.
 

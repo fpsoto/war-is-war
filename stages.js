@@ -71,16 +71,20 @@ export const BOSS_TYPES = {
  * Stage fields:
  *   id, name, text      shown in the banner and the end-of-stage screens
  *   squad               soldiers the stage starts with (at least; earned soldiers carry over)
- *   pace                multiplier on every enemy's base speed in this stage
- *   fireInterval        seconds between volleys (the weapon system in #14 replaces this)
+ *   pace                multiplier on every enemy's base speed in this stage (the tier's speed
+ *                       multiplier applies on top)
+ *   fireInterval        seconds between shots while a magazine lasts
  *   contactDamage       health lost per enemy that reaches or slips past the squad
  *   reward              granted when the stage is cleared (applied by #17; recorded here now)
  *   waves[]:
  *     enemies           { type: count } — the total this wave brings, not the number on screen at once
  *     formation         cols + spacingZ + startZ, and either spacingX or fullWidth: true
  *     boss              optional { type, gap }: spawns in a hole of radius `gap` in the formation
- *     downtime          seconds to wait before this wave once its trigger is met (not for wave 1)
- *     whenRemaining     start once the previous wave has at most this many enemies left (default 0)
+ *     downtime          seconds to wait before this wave once its trigger is met (not for wave 1);
+ *                       default: a random pick in the tier's downtime range
+ *     whenRemaining     start once the previous wave has at most this many enemies left;
+ *                       default: the tier's overlap share of the previous wave's size
+ *   A wave never starts while the tier's maxWaves waves are already on the bridge.
  */
 export const STAGES = [
   {
