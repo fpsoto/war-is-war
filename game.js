@@ -573,16 +573,23 @@ function startWave(w) {
     }
     if (xs.length === 0) continue;
     const phase = (row % 2) * 0.4; // near-synchronised march
-    // Rows go straight into the formation while the pool has room. From the first row that
-    // doesn't fit, every later row is queued too, so reinforcements keep the formation order.
-    if (!queuing && freeTop >= xs.length) {
+    // Wave 1 is laid out in place while the pool has room: it's on the bridge before the stage
+    // starts. From the first row that doesn't fit, every later row is queued too, so
+    // reinforcements keep the formation order. Later waves are always queued: they march in row
+    // by row from the far end instead of popping into existence in view of the camera.
+    if (w === 0 && !queuing && freeTop >= xs.length) {
       for (let k = 0; k < xs.length; k++) spawnEnemy(types[k], xs[k] + rand(-0.04, 0.04), z + rand(-0.04, 0.04), w, phase);
     } else {
       queuing = true;
       W.queue.push({ xs, types, wave: w, phase, interval });
     }
   }
-  if (wave.boss) spawnBoss(wave.boss, bossZ, stageMods.speed);
+  if (wave.boss) {
+    // A marching-in wave behaves as if its front row stood at the entry point, so the boss
+    // starts at the same offset from it that it has from startZ in the laid-out formation.
+    const z = w === 0 ? bossZ : CFG.reinforcementZ + (bossZ - f.startZ);
+    spawnBoss(wave.boss, z, stageMods.speed);
+  }
 }
 
 function updateWaves(dt) {
