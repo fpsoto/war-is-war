@@ -28,6 +28,8 @@ const CFG = {
   bulletSpeed: 55,
   bulletRange: 95,
   bulletDamage: 1,        // before armor; weapon upgrades (#17) raise it
+  magSize: 40,            // shots per magazine, per soldier
+  reloadTime: 0.9,        // seconds to reload an empty magazine
   spread: 0.03,           // random aim jitter in radians
   soldierHp: 100,         // health of each squad member (durability upgrades in #17 raise it)
   funnelDist: 14,         // at this distance the formation breaks and rushes the squad
@@ -345,6 +347,8 @@ for (let i = 0; i < SQUAD_MAX; i++) {
   s.dying = false; // playing the fall animation
   s.t = 0;         // seconds since it fell
   s.px = 0; s.pz = 0; // current position (eases towards the layout slot)
+  s.ammo = 0;      // rounds left in the magazine
+  s.reloadT = 0;   // seconds of reload left (> 0 = reloading, not firing)
   scene.add(s.group);
   squad.push(s);
 }
@@ -353,7 +357,12 @@ const player = {
   x: 0, targetX: 0, z: 0, fireT: 0, prevX: 0,
   size: 1, // living soldiers
   rapidT: 0, pierceT: 0, // timed power-ups (seconds left)
+  // weapon stats shared by the squad, rebuilt each stage from CFG + weaponMods
+  weapon: { magSize: CFG.magSize, reloadTime: CFG.reloadTime },
 };
+// Persistent weapon modifiers (permanent upgrades from #17 will write here). Applied at stage
+// setup, before magazines are handed out, so the reload stagger uses the final magazine size.
+const weaponMods = {};
 // World positions of the living soldiers, rewritten every frame. Preallocated: the enemy loop
 // reads it hundreds of times per frame.
 const squadPos = Array.from({ length: SQUAD_MAX }, () => ({ x: 0, z: 0 }));
@@ -956,6 +965,7 @@ const postGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.9, 8);
 const postMat = new THREE.MeshStandardMaterial({ color: 0x2b3038, metalness: 0.5, roughness: 0.5 });
 const panels = [];
 let panelTimer = 1.5;
+let panelsEnabled = true; // ?debug can switch the signs off for measurements
 
 // Each panel owns a small canvas texture, redrawn only when it is hit.
 function drawPanel(p) {
@@ -1044,7 +1054,7 @@ function clearPanels() {
 function updatePanels(dt, playing) {
   if (playing) {
     panelTimer -= dt;
-    if (panelTimer <= 0) {
+    if (panelTimer <= 0 && panelsEnabled) {
       spawnPanel();
       panelTimer = rand(2.2, 3.6);
     }
@@ -1277,15 +1287,35 @@ let nextAction = () => startStage(0); // what the overlay button does
 
 const stageTitle = (idx) => `STAGE ${STAGES[idx].id}`;
 
-// Squad health HUD: SQUAD_MAX mini bars built once; updateHud shows one per living soldier.
+// Squad HUD: one block per soldier slot, built once. Each block is a health bar (updated by
+// updateHud on damage) over a thin ammo strip (updated every frame by updateAmmoHud).
 const squadBarEls = Array.from({ length: SQUAD_MAX }, () => {
   const el = document.createElement('div');
-  el.className = 'bar hp';
+  el.className = 'soldier';
+  const hp = document.createElement('div');
+  hp.className = 'bar hp';
   const fill = document.createElement('i');
-  el.appendChild(fill);
+  hp.appendChild(fill);
+  const ammo = document.createElement('div');
+  ammo.className = 'ammo';
+  const ammoFill = document.createElement('i');
+  ammo.appendChild(ammoFill);
+  el.append(hp, ammo);
   ui.squadBars.appendChild(el);
-  return { el, fill };
+  return { el, hp, fill, ammo, ammoFill, lastAmmo: -1, lastReloading: false };
 });
+
+// Runs every frame, so it only writes to the DOM when a strip's value changes by a visible step.
+function updateAmmoHud() {
+  for (let k = 0; k < player.size; k++) {
+    const s = squad[k], bar = squadBarEls[k];
+    const reloading = s.reloadT > 0;
+    const f = reloading ? 1 - s.reloadT / player.weapon.reloadTime : s.ammo / player.weapon.magSize;
+    const q = Math.round(f * 40) / 40;
+    if (q !== bar.lastAmmo) { bar.ammoFill.style.transform = `scaleX(${q})`; bar.lastAmmo = q; }
+    if (reloading !== bar.lastReloading) { bar.ammo.classList.toggle('reloading', reloading); bar.lastReloading = reloading; }
+  }
+}
 
 function showToast(text, color) {
   const el = document.createElement('div');
@@ -1321,7 +1351,7 @@ function updateHud() {
     if (alive) {
       const f = Math.max(0, squad[k].hp) / CFG.soldierHp;
       bar.fill.style.transform = `scaleX(${f})`;
-      bar.el.classList.toggle('low', f < 0.35);
+      bar.hp.classList.toggle('low', f < 0.35);
     }
   }
   ui.kills.textContent = `${kills} kills`;
@@ -1386,6 +1416,9 @@ function reviveSoldier(x, z) {
   s.dying = false;
   s.t = 0;
   s.px = x; s.pz = z;
+  s.ammo = player.weapon.magSize;
+  s.reloadT = 0;
+  s.gun.rotation.set(0, 0, 0);
   s.group.rotation.set(0, 0, 0);
   s.group.position.set(x, 0, z);
   s.group.visible = s.blob.visible = true;
@@ -1434,10 +1467,27 @@ function setupStage(idx, carry = 0) {
     s.dying = false;
     s.group.visible = s.blob.visible = false;
   }
+  player.weapon.magSize = weaponMods.magSize ?? CFG.magSize;
+  player.weapon.reloadTime = weaponMods.reloadTime ?? CFG.reloadTime;
   for (const [ox, oz] of layout) reviveSoldier(player.x + ox, player.z + oz);
+  // Stagger: each soldier starts at a different point of the fire-and-reload cycle, evenly spread
+  // over the whole cycle (period P = magazine time + reload). With reloads spread like that they
+  // can't all overlap while the reload is shorter than P, so the squad never goes silent at once.
+  // Soldier k starts `off` seconds into its cycle: still firing with fewer rounds, or reloading.
+  const fi = st.fireInterval, mag = player.weapon.magSize, reload = player.weapon.reloadTime;
+  const fireDur = mag * fi, period = fireDur + reload;
+  for (let k = 1; k < player.size; k++) {
+    const off = (period * k) / player.size;
+    if (off < fireDur) {
+      squad[k].ammo = Math.max(1, mag - Math.floor(off / fi));
+    } else {
+      squad[k].ammo = 0;
+      squad[k].reloadT = period - off;
+    }
+  }
   clearPanels();
   // a few panels already on their way so the edges are populated from the start
-  for (const z of [-24, -50, -75]) spawnPanel(z);
+  if (panelsEnabled) for (const z of [-24, -50, -75]) spawnPanel(z);
   kills = 0;
   remaining = stageTotal;
   updateHud();
@@ -1561,6 +1611,16 @@ function updatePlayer(dt) {
     s.legs[1].rotation.x = -legSwing;
     s.recoil = Math.max(0, s.recoil - dt * 18);
     s.gun.position.z = -0.35 + s.recoil * 0.08;
+    // Reload: count down, refill at the end. Meanwhile the rifle dips and rolls (a bump that
+    // peaks halfway through the reload) so the pause in fire reads as a reload, not a bug.
+    if (s.reloadT > 0) {
+      if (playing) s.reloadT -= dt;
+      if (s.reloadT <= 0) { s.reloadT = 0; s.ammo = player.weapon.magSize; }
+      const bump = Math.sin((1 - s.reloadT / player.weapon.reloadTime) * Math.PI);
+      s.gun.rotation.set(-0.5 * bump, 0, 0.6 * bump);
+    } else if (s.gun.rotation.x !== 0) {
+      s.gun.rotation.set(0, 0, 0);
+    }
     s.flashT -= dt;
     s.flash.visible = s.flashT > 0;
     if (s.flash.visible) {
@@ -1576,8 +1636,14 @@ function updatePlayer(dt) {
     // instead of silently lowering the fire rate.
     player.fireT -= dt;
     while (player.fireT <= 0) {
-      // outer soldiers angle slightly outwards to cover more of the road
-      layout.forEach(([ox], k) => fire(squad[k], ox * 0.05));
+      // Each soldier with rounds left fires one shot per volley; the last round starts its
+      // reload. Outer soldiers angle slightly outwards to cover more of the road.
+      layout.forEach(([ox], k) => {
+        const s = squad[k];
+        if (s.reloadT > 0) return;
+        fire(s, ox * 0.05);
+        if (--s.ammo <= 0) s.reloadT = player.weapon.reloadTime;
+      });
       player.fireT += st.fireInterval * (player.rapidT > 0 ? 0.5 : 1);
     }
   }
@@ -1620,6 +1686,7 @@ function frame() {
   renderEnemies();
   renderBullets();
   updatePowersHud();
+  updateAmmoHud();
   updateCamera(dt);
 
   renderer.render(scene, camera);
@@ -1650,7 +1717,15 @@ if (params.has('debug')) {
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
     // living soldiers' health and positions, in squad order
-    get squad() { return squad.slice(0, player.size).map((s) => ({ hp: Math.round(s.hp), x: +s.px.toFixed(2), z: +s.pz.toFixed(2) })); },
+    get squad() {
+      return squad.slice(0, player.size).map((s) => ({
+        hp: Math.round(s.hp), x: +s.px.toFixed(2), z: +s.pz.toFixed(2), ammo: s.ammo, reloading: s.reloadT > 0,
+      }));
+    },
+    // weapon modifiers applied from the next stage start, e.g. setWeapon({ magSize: 10 })
+    setWeapon(stats) { Object.assign(weaponMods, stats); },
+    // turn the power-up signs off (or back on) to measure things without pickups interfering
+    panels(on) { panelsEnabled = on; if (!on) clearPanels(); },
     get fallen() { return squad.slice(player.size).filter((s) => s.dying).length; },
     power(type) { applyPowerUp(type); },
     // per enemy type: how many are alive and their mean z (larger z = closer to the squad)
