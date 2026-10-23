@@ -63,6 +63,17 @@ export function tierFor(stageId) {
   return DIFFICULTY_TIERS.find((t) => stageId >= t.stages[0] && stageId <= t.stages[1]);
 }
 
+/*
+ * Stage-clear rewards (docs/level-design.md §4), granted the first time a stage is cleared:
+ *   none            nothing (the tutorial stage)
+ *   fireRateBoost   { amount, temporary: true }: +amount fire rate during the next stage
+ *   armorPiercing   enemy armor blocks half as much damage from then on
+ *   reloadSpeed     { amount }: permanent +amount reload speed
+ *   rifleUpgrade    { damage }: permanent +damage bullet damage
+ *   grenade         { charges }: grenade charges, stored for the abilities system (#22)
+ */
+export const REWARD_TYPES = ['none', 'fireRateBoost', 'armorPiercing', 'reloadSpeed', 'rifleUpgrade', 'grenade'];
+
 export const BOSS_TYPES = {
   brute: { hp: 160, scale: 3.6 },
 };
@@ -75,7 +86,7 @@ export const BOSS_TYPES = {
  *                       multiplier applies on top)
  *   fireInterval        seconds between shots while a magazine lasts
  *   contactDamage       health lost per enemy that reaches or slips past the squad
- *   reward              granted when the stage is cleared (applied by #17; recorded here now)
+ *   reward              granted the first time the stage is cleared (see REWARD_TYPES)
  *   waves[]:
  *     enemies           { type: count } — the total this wave brings, not the number on screen at once
  *     formation         cols + spacingZ + startZ, and either spacingX or fullWidth: true
@@ -189,7 +200,12 @@ export function validateStages(stages = STAGES) {
     if (!s.name || !s.text) fail(s, 'name and text are required');
     if (!Number.isInteger(s.squad) || s.squad < 1) fail(s, 'squad must be a positive integer');
     for (const k of ['pace', 'fireInterval', 'contactDamage']) if (!num(s[k]) || s[k] <= 0) fail(s, `${k} must be a positive number`);
-    if (!s.reward || !s.reward.type) fail(s, 'reward.type is required');
+    if (!s.reward || !REWARD_TYPES.includes(s.reward.type)) fail(s, `reward.type must be one of ${REWARD_TYPES.join(', ')}`);
+    const r = s.reward;
+    if (r.type === 'fireRateBoost' && !(num(r.amount) && r.amount > 0)) fail(s, 'fireRateBoost needs a positive amount');
+    if (r.type === 'reloadSpeed' && !(num(r.amount) && r.amount > 0)) fail(s, 'reloadSpeed needs a positive amount');
+    if (r.type === 'rifleUpgrade' && !(num(r.damage) && r.damage > 0)) fail(s, 'rifleUpgrade needs a positive damage');
+    if (r.type === 'grenade' && !(Number.isInteger(r.charges) && r.charges > 0)) fail(s, 'grenade needs a positive integer charges');
     if (!Array.isArray(s.waves) || s.waves.length === 0) fail(s, 'at least one wave is required');
     s.waves.forEach((w, wi) => {
       const where = `wave ${wi + 1}`;
