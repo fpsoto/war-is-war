@@ -17,7 +17,9 @@ Works on desktop, tablets and phones (portrait and landscape).
 | `◀` `▶` or `A` `D` | Move the squad left / right |
 | `Space` / `Enter` | Confirm on menus |
 
-Firing is automatic. Each soldier has its own health: an enemy that reaches the squad hurts the
+Firing is automatic. Each soldier empties a magazine and then reloads; the squad's magazines are
+staggered so someone is always firing. The thin strip under each health bar shows the rounds left
+(gold) or the reload progress (grey). Each soldier has its own health: an enemy that reaches the squad hurts the
 soldier it touches, and one that slips past hurts the soldier nearest to the gap. A soldier at
 zero health falls and the squad closes ranks. The stage is lost when the last soldier falls.
 
@@ -77,7 +79,7 @@ docs/level-design.md   the 30-stage campaign design
 - `stages.js`: enemy and boss stats, and every stage as data. A stage lists its waves (enemy counts
   per type, formation, boss, downtime, and when the next wave starts), plus the starting squad, pace,
   fire rate, contact damage and reward.
-- `CFG` at the top of `game.js`: road size, the active-enemy cap, the reinforcement entry point,
+- `CFG` at the top of `game.js`: soldier health, bullet damage, magazine size and reload time, road size, the active-enemy cap, the reinforcement entry point,
   the default wave downtime, bullet speed and range, player health, and the distance at which the
   horde breaks formation.
 - `POWERUPS` in `game.js`: label, colours, hits needed and spawn weight of each sign.
