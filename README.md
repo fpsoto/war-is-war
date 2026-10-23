@@ -17,7 +17,11 @@ Works on desktop, tablets and phones (portrait and landscape).
 | `◀` `▶` or `A` `D` | Move the squad left / right |
 | `Space` / `Enter` | Confirm on menus |
 
-Firing is automatic. Every enemy that reaches your squad, or slips past it, costs health.
+Firing is automatic. Each soldier empties a magazine and then reloads; the squad's magazines are
+staggered so someone is always firing. The thin strip under each health bar shows the rounds left
+(gold) or the reload progress (grey). Each soldier has its own health: an enemy that reaches the squad hurts the
+soldier it touches, and one that slips past hurts the soldier nearest to the gap. A soldier at
+zero health falls and the squad closes ranks. The stage is lost when the last soldier falls.
 
 ### Stages
 
@@ -36,7 +40,7 @@ Signs travel down both edges of the bridge. Shoot one until its bar is empty to 
 |---|---|
 | **+1 SOLDIER** | Another soldier joins the squad (max 8) |
 | **x2 FIRE RATE** | Double fire rate for 8 s |
-| **+30 HEALTH** | Restores health |
+| **+30% HEALTH** | Every living soldier recovers 30% of its health |
 | **PIERCE** | Bullets go through up to 4 enemies for 6 s |
 
 ## Running locally
@@ -53,24 +57,32 @@ python -m http.server 8000
 
 Then open the printed URL. Handy URL parameters:
 
-- `?level=2` or `?level=3` jumps straight to a stage.
+- `?stage=2` or `?stage=3` jumps straight to a stage (`?level=` also works).
 - `?play` skips the start screen.
+- `?cap=120` lowers the active-enemy cap, to test reinforcements or performance on weak devices.
+- `?debug` exposes `window.__warIsWar` in the console: live state, plus `step(seconds)` to advance the
+  simulation without rendering and `aim('sweep')` as an autopilot, for automated checks of stage flow.
 
 ## Project structure
 
 ```
-index.html   HUD, overlays and responsive CSS; loads Three.js via an import map
-game.js      the whole game: scene, squad, enemies, boss, bullets, power-ups, loop
-.nojekyll    tells GitHub Pages to serve the files as-is
+index.html             HUD, overlays and responsive CSS; loads Three.js via an import map
+game.js                the game: scene, squad, enemy pool, wave spawner, boss, bullets, power-ups, loop
+stages.js              campaign data: enemy types, bosses and stages (validated in CI)
+docs/level-design.md   the 30-stage campaign design
+.github/               issue and PR templates, CI and the release workflow
+.nojekyll              tells GitHub Pages to serve the files as-is
 ```
 
 ## Tuning
 
-All the balance knobs live at the top of `game.js`:
-
-- `CFG`: road size, bullet speed and range, player health, the distance at which the horde breaks formation.
-- `LEVELS`: enemy count, formation, speed, HP, starting squad size, fire rate, contact damage and boss stats per stage.
-- `POWERUPS`: label, colours, hits needed and spawn weight of each sign.
+- `stages.js`: enemy and boss stats, and every stage as data. A stage lists its waves (enemy counts
+  per type, formation, boss, downtime, and when the next wave starts), plus the starting squad, pace,
+  fire rate, contact damage and reward.
+- `CFG` at the top of `game.js`: soldier health, bullet damage, magazine size and reload time, road size, the active-enemy cap, the reinforcement entry point,
+  the default wave downtime, bullet speed and range, player health, and the distance at which the
+  horde breaks formation.
+- `POWERUPS` in `game.js`: label, colours, hits needed and spawn weight of each sign.
 
 ## How it stays fast
 
@@ -92,6 +104,12 @@ The game has to animate 500+ enemies at 60 fps, including on phones:
   The game ships no image files.
 - **Responsive camera.** The camera distance is computed from the horizontal field of view,
   so the full width of the road fits on any aspect ratio.
+
+## Roadmap
+
+The game is growing into a 30-stage campaign with 12 enemy types, boss fights, upgrades and an
+endless mode. The full design is in [docs/level-design.md](docs/level-design.md). The work is
+planned sprint by sprint in the "War is War" GitHub Project, with milestones `v0.2.0` to `v0.7.0`.
 
 ## Development workflow
 

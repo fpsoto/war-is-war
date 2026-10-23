@@ -33,11 +33,24 @@ jobs:
         with:
           node-version: 22
 
-      # game.js is an ES module; node only parses it as one with an .mjs extension.
+      # The scripts are ES modules; node only parses them as such with an .mjs extension.
       - name: Syntax check (version ${{ steps.version.outputs.version }})
         run: |
-          cp game.js "$RUNNER_TEMP/game.mjs"
-          node --check "$RUNNER_TEMP/game.mjs"
+          for f in ./*.js; do
+            cp "$f" "$RUNNER_TEMP/$(basename "$f" .js).mjs"
+            node --check "$RUNNER_TEMP/$(basename "$f" .js).mjs"
+          done
+
+      # stages.js is pure data with no imports, so it can be loaded and validated here: a typo in
+      # a stage fails CI instead of the player's browser.
+      - name: Validate the stage data
+        run: |
+          cp stages.js "$RUNNER_TEMP/stages.mjs"
+          node --input-type=module -e "
+            const { STAGES, validateStages, stageEnemyTotal } = await import('$RUNNER_TEMP/stages.mjs');
+            validateStages();
+            for (const s of STAGES) console.log('Stage ' + s.id + ' ' + s.name + ': ' + s.waves.length + ' wave(s), ' + stageEnemyTotal(s) + ' enemies');
+          "
 
       # The game looks its HUD up by id; a renamed element would only fail at runtime in the
       # browser, so catch it here.

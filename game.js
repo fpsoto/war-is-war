@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { STAGES, ENEMY_TYPES, BOSS_TYPES, stageEnemyTotal, validateStages } from './stages.js';
 
 /*
  * War is War — a 3D horde shooter built with Three.js.
@@ -19,34 +20,24 @@ const CFG = {
   roadWidth: 12,
   roadLength: 280,
   roadStart: 30,          // z where the road begins (towards the camera)
-  maxEnemies: 520,        // capacity of the instanced meshes
+  // Active-enemy cap: the size of the enemy pool and of every instanced mesh. A stage may bring
+  // more enemies than this in total; the extra rows wait in the reinforcement queue.
+  maxActiveEnemies: 520,
+  reinforcementZ: -80,    // where queued rows enter the bridge (hidden by the fog)
+  waveDowntime: 6,        // default seconds between waves (stages can override per wave)
   bulletSpeed: 55,
   bulletRange: 95,
+  bulletDamage: 1,        // before armor; weapon upgrades (#17) raise it
+  magSize: 40,            // shots per magazine, per soldier
+  reloadTime: 0.9,        // seconds to reload an empty magazine
   spread: 0.03,           // random aim jitter in radians
-  playerHp: 100,
+  soldierHp: 100,         // health of each squad member (durability upgrades in #17 raise it)
   funnelDist: 14,         // at this distance the formation breaks and rushes the squad
 };
 const HALF_W = CFG.roadWidth / 2;
 
-// Stages: tune difficulty here.
-const LEVELS = [
-  {
-    title: 'STAGE 1', text: '100 soldiers in formation',
-    count: 100, cols: 10, spacingX: 1.1, spacingZ: 1.8, startZ: -34,
-    hp: 1, speed: 2.0, squad: 1, fireInterval: 0.07, contactDamage: 5,
-  },
-  {
-    title: 'STAGE 2', text: '500 soldiers wall to wall',
-    count: 500, cols: 14, fullWidth: true, spacingZ: 0.95, startZ: -32,
-    hp: 1, speed: 1.6, squad: 2, fireInterval: 0.06, contactDamage: 4,
-  },
-  {
-    title: 'STAGE 3', text: '500 soldiers and a giant',
-    count: 500, cols: 14, fullWidth: true, spacingZ: 0.95, startZ: -32,
-    hp: 1, speed: 1.5, squad: 3, fireInterval: 0.06, contactDamage: 4,
-    boss: { hp: 160, scale: 3.6, gap: 2.4 },
-  },
-];
+// Stages are data (stages.js). Fail loudly at startup if the data is malformed.
+validateStages();
 
 // ---------- Renderer / scene / camera ----------
 const isTouch = window.matchMedia('(pointer: coarse)').matches;
@@ -343,33 +334,96 @@ function squadLayout(n) {
   return out;
 }
 // All soldiers are built up front and toggled visible, so gaining one never stalls a frame.
+//
+// Squad bookkeeping: the living soldiers are always squad[0 .. player.size-1], in layout order.
+// When one falls, it is swapped with the last living soldier and player.size shrinks; the fallen
+// one plays its death animation from the tail of the array. Each soldier eases towards its layout
+// slot, so the formation visibly closes the gap instead of teleporting.
 const squad = [];
 for (let i = 0; i < SQUAD_MAX; i++) {
   const s = buildSoldier();
   s.group.visible = s.blob.visible = false;
+  s.hp = CFG.soldierHp;
+  s.dying = false; // playing the fall animation
+  s.t = 0;         // seconds since it fell
+  s.px = 0; s.pz = 0; // current position (eases towards the layout slot)
+  s.ammo = 0;      // rounds left in the magazine
+  s.reloadT = 0;   // seconds of reload left (> 0 = reloading, not firing)
   scene.add(s.group);
   squad.push(s);
 }
 
 const player = {
-  x: 0, targetX: 0, z: 0, hp: CFG.playerHp, fireT: 0, prevX: 0, size: 1,
+  x: 0, targetX: 0, z: 0, fireT: 0, prevX: 0,
+  size: 1, // living soldiers
   rapidT: 0, pierceT: 0, // timed power-ups (seconds left)
+  // weapon stats shared by the squad, rebuilt each stage from CFG + weaponMods
+  weapon: { magSize: CFG.magSize, reloadTime: CFG.reloadTime },
 };
-const squadPos = []; // [{x,z}] world positions of the active soldiers, rebuilt every frame
+// Persistent weapon modifiers (permanent upgrades from #17 will write here). Applied at stage
+// setup, before magazines are handed out, so the reload stagger uses the final magazine size.
+const weaponMods = {};
+// World positions of the living soldiers, rewritten every frame. Preallocated: the enemy loop
+// reads it hundreds of times per frame.
+const squadPos = Array.from({ length: SQUAD_MAX }, () => ({ x: 0, z: 0 }));
 
 // ---------- Enemies (one InstancedMesh per body part) ----------
 // Struct-of-arrays: enemy i is E.x[i], E.z[i], ... Typed arrays keep the hot loops
 // cache-friendly and allocation-free.
-const MAX_E = CFG.maxEnemies;
+const MAX_E = CFG.maxActiveEnemies;
 const E = {
   x: new Float32Array(MAX_E), z: new Float32Array(MAX_E),
   vx: new Float32Array(MAX_E), sepX: new Float32Array(MAX_E), sepZ: new Float32Array(MAX_E),
   speed: new Float32Array(MAX_E), phase: new Float32Array(MAX_E), scale: new Float32Array(MAX_E),
-  yaw: new Float32Array(MAX_E), hp: new Int8Array(MAX_E),
-  state: new Uint8Array(MAX_E), // 0 hidden, 1 alive, 2 dying
+  yaw: new Float32Array(MAX_E),
+  hp: new Float32Array(MAX_E),  // fractional: armor scales the damage of each hit
+  state: new Uint8Array(MAX_E), // 0 free, 1 alive, 2 dying (the slot is released when the fall ends)
   t: new Float32Array(MAX_E), flash: new Float32Array(MAX_E),
+  wave: new Int8Array(MAX_E),   // index of the wave the enemy belongs to
+  type: new Uint8Array(MAX_E),  // index into TYPES
 };
-let N = 0; // enemies used by the current stage
+
+// Enemy types from stages.js, indexed so the hot loops read TYPES[E.type[i]] instead of looking
+// up strings. Palettes are turned into THREE.Color objects once, here, not on every spawn.
+const TYPE_KEYS = Object.keys(ENEMY_TYPES);
+const TYPES = TYPE_KEYS.map((k) => ENEMY_TYPES[k]);
+const TYPE_INDEX = Object.fromEntries(TYPE_KEYS.map((k, i) => [k, i]));
+const TYPE_COLORS = TYPES.map((t) => ({
+  body: t.body.map((c) => new THREE.Color(c)),
+  skin: t.skin.map((c) => new THREE.Color(c)),
+}));
+
+// Enemy pool. Free slot indices live on a stack, so spawning and releasing are O(1) and never
+// allocate. Slots are handed out lowest-first and `hi` tracks the highest slot used this stage:
+// every per-enemy loop and the instanced draw count stop at `hi` instead of the full capacity.
+const freeSlots = new Int32Array(MAX_E);
+let freeTop = 0;
+let hi = 0;
+
+// ?cap=N (testing) hands out fewer slots than the meshes can hold, lowering the active cap.
+// Floor of 32: a queued row only enters when the whole row fits, so the cap must exceed any row.
+const activeCap = THREE.MathUtils.clamp(
+  parseInt(new URLSearchParams(location.search).get('cap'), 10) || MAX_E, 32, MAX_E);
+
+function resetEnemyPool() {
+  E.state.fill(0);
+  for (let k = 0; k < activeCap; k++) freeSlots[k] = activeCap - 1 - k; // slot 0 on top
+  freeTop = activeCap;
+  hi = 0;
+}
+
+function allocEnemy() {
+  if (freeTop === 0) return -1;
+  const i = freeSlots[--freeTop];
+  if (i + 1 > hi) hi = i + 1;
+  return i;
+}
+
+function releaseEnemy(i) {
+  E.state[i] = 0;
+  freeSlots[freeTop++] = i;
+}
+
 const bodyColors = [];
 const skinColors = [];
 
@@ -395,52 +449,161 @@ const parts = {
 };
 parts.legR = makeInst(parts.legL.geometry, parts.legL.material);
 parts.armR = makeInst(parts.armL.geometry, parts.armL.material);
+// Armor parts, drawn only for `plated` types (Heavy). Every other instance gets the zero matrix,
+// so adding armor costs two draw calls total, not one per armored enemy.
+const armorMat = new THREE.MeshLambertMaterial({ color: 0x8a919b });
+parts.helmet = makeInst(new THREE.SphereGeometry(0.26, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), armorMat);
+parts.plate = makeInst(new THREE.BoxGeometry(0.6, 0.5, 0.1), armorMat);
 
-const CLOTHES = ['#5b7a3a', '#55703a', '#4f6a36', '#62803f', '#5a7444'];
-const SKINS = ['#7fa15a', '#8bb06a', '#6e9450', '#94b874'];
+// Per-slot base colors. A slot is recolored from its type's palette whenever an enemy spawns in it.
 for (let i = 0; i < MAX_E; i++) {
-  bodyColors.push(new THREE.Color(CLOTHES[(i * 3) % CLOTHES.length]));
-  skinColors.push(new THREE.Color(SKINS[(i * 7) % SKINS.length]));
+  bodyColors.push(new THREE.Color());
+  skinColors.push(new THREE.Color());
   parts.torso.setColorAt(i, bodyColors[i]);
   parts.head.setColorAt(i, skinColors[i]);
   parts.armL.setColorAt(i, skinColors[i]);
   parts.armR.setColorAt(i, skinColors[i]);
 }
+let armColorsDirty = false; // arm colors only change on spawn, so they're uploaded only then
 
-// Lays the stage's enemies out on a grid. When the stage has a boss, slots inside
-// an ellipse around the boss are skipped (and extra rows added) so the giant
-// marches inside a hole in the middle of the horde.
-function spawnFormation(lv) {
-  const cols = lv.cols;
-  const spacingX = lv.fullWidth ? (CFG.roadWidth - 1.0) / (cols - 1) : lv.spacingX;
+// ---------- Stage manager and wave spawner ----------
+// A stage (stages.js) is a list of waves. Wave 1 is laid out when the stage is set up; each later
+// wave starts once the previous one is down to `whenRemaining` enemies, after `downtime` seconds.
+// Rows that don't fit under the active-enemy cap wait in a queue and enter at the far end of the
+// bridge as slots free up.
+const W = {
+  next: 0,      // index of the next wave to start
+  timer: 0,     // downtime accumulated towards the next wave
+  queue: [],    // reinforcement rows: { xs, types, wave, phase, interval }
+  rowTimer: 0,  // seconds until the next queued row may enter
+  alive: [],    // per wave: enemies still alive or queued
+};
+let stageTotal = 0; // enemies the whole stage brings, across all waves (bosses excluded)
+
+function spawnEnemy(type, x, z, wave, phase) {
+  const i = allocEnemy();
+  if (i < 0) return false;
+  const ti = TYPE_INDEX[type];
+  const t = TYPES[ti];
+  E.type[i] = ti;
+  E.x[i] = x;
+  E.z[i] = z;
+  E.vx[i] = 0;
+  // same speed for every enemy of a type keeps its part of the formation intact
+  E.speed[i] = t.speed * STAGES[stageIdx].pace;
+  E.phase[i] = phase;
+  E.scale[i] = t.scale * rand(0.95, 1.05);
+  E.hp[i] = t.hp;
+  E.state[i] = 1;
+  E.t[i] = 0;
+  E.flash[i] = 0;
+  E.yaw[i] = 0;
+  E.wave[i] = wave;
+  const pal = TYPE_COLORS[ti];
+  bodyColors[i].copy(pal.body[i % pal.body.length]);
+  skinColors[i].copy(pal.skin[(i * 7) % pal.skin.length]);
+  parts.armL.setColorAt(i, skinColors[i]);
+  parts.armR.setColorAt(i, skinColors[i]);
+  armColorsDirty = true;
+  return true;
+}
+
+// Spreads counts proportionally (like Bresenham's line algorithm): { a: 3, b: 1 } -> a a b a.
+function spread(counts) {
+  const entries = Object.entries(counts);
+  const total = entries.reduce((a, [, n]) => a + n, 0);
+  const placed = entries.map(() => 0);
+  const out = [];
+  for (let k = 1; k <= total; k++) {
+    let best = 0, bestDeficit = -Infinity;
+    entries.forEach(([, n], j) => {
+      const deficit = (n * k) / total - placed[j];
+      if (deficit > bestDeficit) { bestDeficit = deficit; best = j; }
+    });
+    placed[best]++;
+    out.push(entries[best][0]);
+  }
+  return out;
+}
+
+// Expands { soldier: 120, runner: 20 } into the order the formation is filled, front row first.
+// Each type goes to its `placement` band. Fast types fill the front rows and slow types the back,
+// so speed differences open gaps instead of making enemies walk through each other (separation
+// only runs near the squad). Within a band, types are spread proportionally so a mixed band
+// doesn't arrive as one block per type. Runs once per wave, outside the frame loop.
+function waveRoster(wave) {
+  const bands = { front: {}, mixed: {}, back: {} };
+  for (const [type, n] of Object.entries(wave.enemies)) bands[ENEMY_TYPES[type].placement][type] = n;
+  return [...spread(bands.front), ...spread(bands.mixed), ...spread(bands.back)];
+}
+
+// Lays a wave out on a grid. When the wave has a boss, slots inside an ellipse around it are
+// skipped (pushing enemies to extra rows) so the boss marches inside a hole in the horde.
+function startWave(w) {
+  const st = STAGES[stageIdx];
+  const wave = st.waves[w];
+  const f = wave.formation;
+  const roster = waveRoster(wave);
+  const cols = f.cols;
+  const spacingX = f.fullWidth ? (CFG.roadWidth - 1.0) / (cols - 1) : f.spacingX;
   const x0 = -spacingX * (cols - 1) / 2;
-  const rowsNeeded = Math.ceil(lv.count / cols);
-  const bossZ = lv.startZ - (rowsNeeded * lv.spacingZ) / 2 - 1;
-  let n = 0;
-  for (let row = 0; n < lv.count; row++) {
-    for (let c = 0; c < cols && n < lv.count; c++) {
+  const rowsNeeded = Math.ceil(roster.length / cols);
+  const bossZ = f.startZ - (rowsNeeded * f.spacingZ) / 2 - 1;
+  // time for the formation to advance one row: queued rows enter at this rhythm to keep spacing
+  const interval = f.spacingZ / (ENEMY_TYPES.soldier.speed * st.pace);
+  W.alive[w] = roster.length;
+
+  let n = 0, queuing = false;
+  for (let row = 0; n < roster.length; row++) {
+    const z = f.startZ - row * f.spacingZ;
+    const xs = [], types = [];
+    for (let c = 0; c < cols && n < roster.length; c++) {
       const x = x0 + c * spacingX;
-      const z = lv.startZ - row * lv.spacingZ;
-      if (lv.boss && Math.hypot(x, (z - bossZ) * 0.8) < lv.boss.gap) continue;
-      E.x[n] = x + rand(-0.04, 0.04);
-      E.z[n] = z + rand(-0.04, 0.04);
-      E.vx[n] = 0;
-      E.speed[n] = lv.speed; // same speed for everyone keeps the formation intact
-      E.phase[n] = (row % 2) * 0.4; // near-synchronised march
-      E.scale[n] = rand(0.95, 1.05);
-      E.hp[n] = lv.hp;
-      E.state[n] = 1;
-      E.t[n] = 0;
-      E.flash[n] = 0;
-      E.yaw[n] = 0;
-      n++;
+      if (wave.boss && Math.hypot(x, (z - bossZ) * 0.8) < wave.boss.gap) continue;
+      xs.push(x);
+      types.push(roster[n++]);
+    }
+    if (xs.length === 0) continue;
+    const phase = (row % 2) * 0.4; // near-synchronised march
+    // Rows go straight into the formation while the pool has room. From the first row that
+    // doesn't fit, every later row is queued too, so reinforcements keep the formation order.
+    if (!queuing && freeTop >= xs.length) {
+      for (let k = 0; k < xs.length; k++) spawnEnemy(types[k], xs[k] + rand(-0.04, 0.04), z + rand(-0.04, 0.04), w, phase);
+    } else {
+      queuing = true;
+      W.queue.push({ xs, types, wave: w, phase, interval });
     }
   }
-  N = n;
-  for (let i = N; i < MAX_E; i++) E.state[i] = 0;
-  // only draw the instances this stage uses
-  for (const key in parts) parts[key].count = N;
-  return bossZ;
+  if (wave.boss) spawnBoss(wave.boss, bossZ, st.pace);
+}
+
+function updateWaves(dt) {
+  const st = STAGES[stageIdx];
+
+  // Reinforcements: the next queued row enters once the pool has room for the whole row and the
+  // previous row has had time to move one row-spacing forward.
+  W.rowTimer -= dt;
+  if (W.queue.length && W.rowTimer <= 0 && freeTop >= W.queue[0].xs.length) {
+    const r = W.queue.shift();
+    for (let k = 0; k < r.xs.length; k++) {
+      spawnEnemy(r.types[k], r.xs[k] + rand(-0.04, 0.04), CFG.reinforcementZ + rand(-0.04, 0.04), r.wave, r.phase);
+    }
+    W.rowTimer = r.interval;
+  }
+
+  // Next wave: wait until the previous wave is thin enough, then for the downtime.
+  if (W.next < st.waves.length) {
+    const wave = st.waves[W.next];
+    if (W.alive[W.next - 1] <= (wave.whenRemaining ?? 0)) {
+      W.timer += dt;
+      if (W.timer >= (wave.downtime ?? CFG.waveDowntime)) {
+        startWave(W.next);
+        W.next++;
+        W.timer = 0;
+        showBanner(`WAVE ${W.next}`, `${W.alive[W.next - 1]} enemies incoming`);
+      }
+    }
+  }
 }
 
 // Reused scratch objects: hot loops must not allocate.
@@ -459,23 +622,23 @@ function setPart(mesh, i, px, py, pz, rx) {
   mesh.setMatrixAt(i, _mOut);
 }
 
-// x of the squad member closest to x (enemies home in on the nearest soldier)
-function nearestSquadX(x) {
-  let best = squadPos[0].x, bd = Infinity;
-  for (const p of squadPos) {
-    const d = Math.abs(p.x - x);
-    if (d < bd) { bd = d; best = p.x; }
+// Index of the living soldier closest to x (enemies home in on it, leakers hit it).
+function nearestSoldier(x) {
+  let best = 0, bd = Infinity;
+  for (let k = 0; k < player.size; k++) {
+    const d = Math.abs(squadPos[k].x - x);
+    if (d < bd) { bd = d; best = k; }
   }
   return best;
 }
 
 const nearList = new Int32Array(MAX_E);
 function updateEnemies(dt, playing) {
-  const lv = LEVELS[levelIdx];
+  const st = STAGES[stageIdx];
   // Separation is O(k²), so it only runs for enemies that already broke formation
   // near the squad. Far away the grid spacing already prevents overlap.
   let nNear = 0;
-  for (let i = 0; i < N; i++) {
+  for (let i = 0; i < hi; i++) {
     E.sepX[i] = 0; E.sepZ[i] = 0;
     if (E.state[i] === 1 && E.z[i] > player.z - CFG.funnelDist - 1) nearList[nNear++] = i;
   }
@@ -496,18 +659,18 @@ function updateEnemies(dt, playing) {
     }
   }
 
-  for (let i = 0; i < N; i++) {
-    const st = E.state[i];
-    if (st === 0) continue;
-    if (st === 1) {
-      if (playing) {
+  for (let i = 0; i < hi; i++) {
+    const s = E.state[i];
+    if (s === 0) continue;
+    if (s === 1) {
+      if (playing && player.size > 0) {
         // Funnel: march straight while far, then steer harder towards the nearest
         // soldier as the distance shrinks. This drags the crowd into the line of fire.
         const distToPlayer = player.z - E.z[i];
         let vx = 0;
         if (distToPlayer < CFG.funnelDist) {
           const pull = 1 - Math.max(0, distToPlayer) / CFG.funnelDist; // 0 → 1 while approaching
-          const tx = nearestSquadX(E.x[i]);
+          const tx = squadPos[nearestSoldier(E.x[i])].x;
           vx = THREE.MathUtils.clamp((tx - E.x[i]) * 1.2, -2.2, 2.2) * pull;
         }
         E.vx[i] += (vx - E.vx[i]) * Math.min(1, dt * 4); // smoothed steering
@@ -517,37 +680,46 @@ function updateEnemies(dt, playing) {
         E.x[i] = THREE.MathUtils.clamp(E.x[i], -HALF_W + 0.4, HALF_W - 0.4);
         E.yaw[i] = Math.atan2(E.vx[i], E.speed[i]) * 0.7;
 
-        // contact with any soldier, or slipping past the squad, costs HP
-        let touched = E.z[i] > player.z + 1.5;
-        for (const p of squadPos) {
-          const dx = E.x[i] - p.x, dz = E.z[i] - p.z;
-          if (dx * dx + dz * dz < 0.8 * 0.8) { touched = true; break; }
+        // Contact damages the soldier that was touched. An enemy that slips past the squad
+        // without touching anyone damages the soldier nearest to where it got through.
+        let target = -1;
+        for (let k = 0; k < player.size; k++) {
+          const dx = E.x[i] - squadPos[k].x, dz = E.z[i] - squadPos[k].z;
+          if (dx * dx + dz * dz < 0.8 * 0.8) { target = k; break; }
         }
-        if (touched) {
-          hurtPlayer(lv.contactDamage);
+        if (target < 0 && E.z[i] > player.z + 1.5) target = nearestSoldier(E.x[i]);
+        if (target >= 0) {
+          const dmg = st.contactDamage * TYPES[E.type[i]].contact;
           killEnemy(i, false);
+          damageSoldier(target, dmg);
+          if (player.size === 0) break; // squad wiped: indices into squadPos are stale now
         }
       }
       E.phase[i] += dt * E.speed[i] * 3.6;
-    } else if (st === 2) {
+    } else if (s === 2) {
       E.t[i] += dt;
-      if (E.t[i] > 1.3) { E.state[i] = 0; continue; }
+      // the fall animation is over: the slot goes back to the pool for reinforcements
+      if (E.t[i] > 1.3) { releaseEnemy(i); continue; }
     }
     if (E.flash[i] > 0) E.flash[i] -= dt;
   }
 }
 
-// Rebuilds every enemy's 6 part matrices from its state (walk cycle, death fall).
+// Rebuilds every enemy's part matrices from its state (walk cycle, lean, armor, death fall).
 function renderEnemies() {
   const P = parts;
-  for (let i = 0; i < N; i++) {
+  // only upload and draw the slots this stage has touched
+  for (const key in P) P[key].count = hi;
+  for (let i = 0; i < hi; i++) {
     const st = E.state[i];
     if (st === 0) {
       P.torso.setMatrixAt(i, _zero); P.head.setMatrixAt(i, _zero);
       P.legL.setMatrixAt(i, _zero); P.legR.setMatrixAt(i, _zero);
       P.armL.setMatrixAt(i, _zero); P.armR.setMatrixAt(i, _zero);
+      P.helmet.setMatrixAt(i, _zero); P.plate.setMatrixAt(i, _zero);
       continue;
     }
+    const type = TYPES[E.type[i]];
     let fall = 0, sink = 0;
     if (st === 2) {
       // fall backwards in 0.3 s, lie still, then sink through the floor
@@ -557,22 +729,38 @@ function renderEnemies() {
     }
     const ph = E.phase[i];
     const bob = st === 1 ? Math.abs(Math.sin(ph)) * 0.07 : 0;
+    // forward lean (runners) only while alive; a dying enemy falls from upright
+    const pitch = st === 1 ? type.lean : fall;
     // 'YXZ' = turn (yaw) first, then tip over (pitch) in the turned frame
-    _e.set(fall, E.yaw[i], 0, 'YXZ');
+    _e.set(pitch, E.yaw[i], 0, 'YXZ');
     _q.setFromEuler(_e);
     _e.order = 'XYZ'; // restore: _e is shared with setPart()
     const k = E.scale[i];
     _mBase.compose(_v.set(E.x[i], bob - sink, E.z[i]), _q, _s.set(k, k, k));
 
     const swing = st === 1 ? Math.sin(ph) * 0.7 : 0;
-    // zombie-style raised arms, slightly swaying
-    const armSwing = st === 1 ? Math.sin(ph * 0.5) * 0.15 : 0.6;
     setPart(P.legL, i, -0.13, 0.55, 0, swing);
     setPart(P.legR, i, 0.13, 0.55, 0, -swing);
     setPart(P.torso, i, 0, 0.86, 0, 0);
     setPart(P.head, i, 0, 1.38, 0.02, 0);
-    setPart(P.armL, i, -0.34, 1.07, 0, -0.2 + armSwing);
-    setPart(P.armR, i, 0.34, 1.07, 0, -0.2 - armSwing);
+    // Arm pitch: arms point forward (+z) at 0; positive pitch lowers them. Leaning types (runners)
+    // pump their arms down by their sides against the legs; the rest keep zombie-style raised
+    // arms with a slight sway.
+    if (st === 1 && type.lean > 0) {
+      setPart(P.armL, i, -0.34, 1.07, 0, 1.2 - swing * 0.9);
+      setPart(P.armR, i, 0.34, 1.07, 0, 1.2 + swing * 0.9);
+    } else {
+      const armSwing = st === 1 ? Math.sin(ph * 0.5) * 0.15 : 0.6;
+      setPart(P.armL, i, -0.34, 1.07, 0, -0.2 + armSwing);
+      setPart(P.armR, i, 0.34, 1.07, 0, -0.2 - armSwing);
+    }
+    if (type.plated) {
+      setPart(P.helmet, i, 0, 1.42, 0.02, 0);
+      setPart(P.plate, i, 0, 0.9, 0.17, 0);
+    } else {
+      P.helmet.setMatrixAt(i, _zero);
+      P.plate.setMatrixAt(i, _zero);
+    }
 
     // hit feedback: flash white for a few frames
     const flashing = E.flash[i] > 0;
@@ -582,10 +770,15 @@ function renderEnemies() {
   for (const key in P) P[key].instanceMatrix.needsUpdate = true;
   P.torso.instanceColor.needsUpdate = true;
   P.head.instanceColor.needsUpdate = true;
+  if (armColorsDirty) {
+    P.armL.instanceColor.needsUpdate = true;
+    P.armR.instanceColor.needsUpdate = true;
+    armColorsDirty = false;
+  }
 }
 
 // ---------- Giant (stage 3 boss) ----------
-// Modelled at human scale, then the whole group is scaled up (lv.boss.scale).
+// Modelled at human scale, then the whole group is scaled up (BOSS_TYPES[type].scale).
 function buildGiant() {
   const g = new THREE.Group();
   // emissive white at intensity 0: raising the intensity makes the whole body flash on hit
@@ -676,14 +869,16 @@ scene.add(giant.group);
 // state: 0 inactive, 1 alive, 2 dying
 const boss = { active: false, state: 0, hp: 0, maxHp: 1, x: 0, z: 0, speed: 1, phase: 0, flash: 0, t: 0, scale: 1, lastStep: 0 };
 
-function spawnBoss(lv, z) {
+// def is a wave's boss entry ({ type, gap }); pace is the stage's speed multiplier.
+function spawnBoss(def, z, pace) {
+  const type = BOSS_TYPES[def.type];
   boss.active = true;
   boss.state = 1;
-  boss.hp = boss.maxHp = lv.boss.hp;
-  boss.scale = lv.boss.scale;
+  boss.hp = boss.maxHp = type.hp;
+  boss.scale = type.scale;
   boss.x = 0;
   boss.z = z;
-  boss.speed = lv.speed; // same pace as the horde so it stays inside its hole
+  boss.speed = ENEMY_TYPES.soldier.speed * pace; // same pace as the horde so it stays inside its hole
   boss.phase = 0;
   boss.flash = 0;
   boss.t = 0;
@@ -706,7 +901,8 @@ function updateBoss(dt, playing) {
       boss.z += boss.speed * dt;
       const reach = 0.6 * boss.scale;
       if (boss.z + reach > player.z - 0.4) {
-        hurtPlayer(CFG.playerHp); // the giant crushes the squad: instant defeat
+        // the giant crushes the whole squad: instant defeat (#20 replaces this with real attacks)
+        while (player.size > 0) damageSoldier(0, Infinity);
         shake = 0.8;
       }
     }
@@ -759,7 +955,7 @@ function hitBoss(x, y, z) {
 const POWERUPS = {
   soldier: { label: '+1', sub: 'SOLDIER', bg: '#2f6fe0', edge: 0x1b3f8f, ink: '#ffffff', hits: 6, weight: 45 },
   rapid:   { label: 'x2', sub: 'FIRE RATE', bg: '#ffc928', edge: 0xc79a12, ink: '#4a2f00', hits: 8, weight: 20 },
-  heal:    { label: '+30', sub: 'HEALTH', bg: '#2cbf47', edge: 0x1c8a32, ink: '#ffffff', hits: 5, weight: 15 },
+  heal:    { label: '+30%', sub: 'HEALTH', bg: '#2cbf47', edge: 0x1c8a32, ink: '#ffffff', hits: 5, weight: 15 },
   pierce:  { label: '>>>', sub: 'PIERCE', bg: '#9b2fd6', edge: 0x5e1385, ink: '#ffffff', hits: 10, weight: 20 },
 };
 const PANEL = { w: 2.3, h: 1.4, x: HALF_W - 0.2, speed: 3.6, spawnZ: -95, hitHalfW: 1.15 };
@@ -769,6 +965,7 @@ const postGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.9, 8);
 const postMat = new THREE.MeshStandardMaterial({ color: 0x2b3038, metalness: 0.5, roughness: 0.5 });
 const panels = [];
 let panelTimer = 1.5;
+let panelsEnabled = true; // ?debug can switch the signs off for measurements
 
 // Each panel owns a small canvas texture, redrawn only when it is hit.
 function drawPanel(p) {
@@ -794,10 +991,15 @@ function drawPanel(p) {
   p.tex.needsUpdate = true;
 }
 
+function squadInjured() {
+  for (let k = 0; k < player.size; k++) if (squad[k].hp < CFG.soldierHp) return true;
+  return false;
+}
+
 // Weighted random pick, skipping power-ups that would be useless right now.
 function pickPowerType() {
   const options = Object.entries(POWERUPS).filter(([k]) =>
-    !(k === 'soldier' && player.size >= SQUAD_MAX) && !(k === 'heal' && player.hp >= CFG.playerHp));
+    !(k === 'soldier' && player.size >= SQUAD_MAX) && !(k === 'heal' && !squadInjured()));
   let r = Math.random() * options.reduce((a, [, d]) => a + d.weight, 0);
   for (const [k, d] of options) { r -= d.weight; if (r <= 0) return k; }
   return options[0][0];
@@ -826,7 +1028,7 @@ function spawnPanel(z = PANEL.spawnZ) {
     group.add(post);
   }
   // panels get tougher in later stages
-  const hits = Math.round(def.hits * (1 + levelIdx * 0.35));
+  const hits = Math.round(def.hits * (1 + stageIdx * 0.35));
   const p = {
     type, side, group, board, face, edgeMat, canvas, ctx: canvas.getContext('2d'), tex,
     hits, maxHits: hits, x: side * PANEL.x, z, flash: 0, wobble: 0,
@@ -852,7 +1054,7 @@ function clearPanels() {
 function updatePanels(dt, playing) {
   if (playing) {
     panelTimer -= dt;
-    if (panelTimer <= 0) {
+    if (panelTimer <= 0 && panelsEnabled) {
       spawnPanel();
       panelTimer = rand(2.2, 3.6);
     }
@@ -882,19 +1084,23 @@ function hitPanel(p) {
 }
 
 function applyPowerUp(type) {
+  // bullets keep flying after a stage ends; a panel they finish must not revive a lost squad
+  if (state !== 'play') return;
   if (type === 'soldier') {
     if (player.size < SQUAD_MAX) {
-      player.size++;
-      const s = squad[player.size - 1];
-      s.group.visible = s.blob.visible = true;
+      // the recruit runs in from behind the squad and eases into its slot
+      reviveSoldier(player.x, player.z + 2.5);
       showToast('+1 SOLDIER', '#4f8cff');
     }
   } else if (type === 'rapid') {
     player.rapidT = PANEL_DURATION.rapid;
     showToast('FIRE RATE x2!', '#ffc928');
   } else if (type === 'heal') {
-    player.hp = Math.min(CFG.playerHp, player.hp + 30);
-    showToast('+30 HEALTH', '#2cbf47');
+    // every living soldier recovers 30% of max health (docs/level-design.md §4)
+    for (let k = 0; k < player.size; k++) {
+      squad[k].hp = Math.min(CFG.soldierHp, squad[k].hp + CFG.soldierHp * 0.3);
+    }
+    showToast('+30% HEALTH', '#2cbf47');
   } else if (type === 'pierce') {
     player.pierceT = PANEL_DURATION.pierce;
     showToast('PIERCING ROUNDS!', '#c06bff');
@@ -954,7 +1160,7 @@ function updateBullets(dt) {
     if (B.dist[b] > CFG.bulletRange) { B.on[b] = 0; continue; }
     const zMin = B.z[b] - 0.35, zMax = pz + 0.35;
     let hit = -1, best = -Infinity;
-    for (let i = 0; i < N; i++) {
+    for (let i = 0; i < hi; i++) {
       if (E.state[i] !== 1) continue;
       const ez = E.z[i];
       if (ez < zMin || ez > zMax) continue;
@@ -985,14 +1191,19 @@ function updateBullets(dt) {
       continue;
     }
     if (hit >= 0) {
+      // armor blocks a fraction of every bullet's damage
+      const armor = TYPES[E.type[hit]].armor;
+      const dmg = CFG.bulletDamage * (1 - armor);
       // piercing rounds only keep flying when they actually kill the target;
       // otherwise the same tough enemy would be hit again next frame
-      if (B.pierce[b] > 0 && E.hp[hit] <= 1) B.pierce[b]--;
+      if (B.pierce[b] > 0 && E.hp[hit] <= dmg + 1e-6) B.pierce[b]--;
       else B.on[b] = 0;
-      E.hp[hit]--;
+      E.hp[hit] -= dmg;
       E.flash[hit] = 0.08;
-      spawnParticles(B.x[b], 1.1, E.z[hit] + 0.2, 3, 0xffd36b, 3);
-      if (E.hp[hit] <= 0) killEnemy(hit, true);
+      // armored hits throw pale metal sparks instead of the usual yellow flash
+      if (armor > 0) spawnParticles(B.x[b], 1.2, E.z[hit] + 0.3, 4, 0xdfe6ee, 4.5);
+      else spawnParticles(B.x[b], 1.1, E.z[hit] + 0.2, 3, 0xffd36b, 3);
+      if (E.hp[hit] <= 1e-6) killEnemy(hit, true);
     }
   }
 }
@@ -1064,15 +1275,47 @@ const ui = {
   enemyFill: $('enemyFill'), enemyCount: $('enemyCount'),
   bossBar: $('bossBar'), bossFill: $('bossFill'),
   stage: $('stageLabel'),
-  hpFill: $('hpFill'), kills: $('kills'), hurt: $('hurt'),
+  squadBars: $('squadBars'), kills: $('kills'), hurt: $('hurt'),
   overlay: $('overlay'), title: $('ovTitle'), text: $('ovText'), btn: $('ovBtn'),
   banner: $('banner'), bannerTitle: $('bannerTitle'), bannerText: $('bannerText'),
   squad: $('squadCount'), powers: $('powers'), toast: $('toast'),
 };
 let state = 'menu'; // 'menu' | 'play' | 'win' | 'lose'
-let levelIdx = 0, levelStartSize = 1;
+let stageIdx = 0, stageStartSize = 1;
 let kills = 0, remaining = 0, shake = 0, time = 0;
-let nextAction = () => startLevel(0); // what the overlay button does
+let nextAction = () => startStage(0); // what the overlay button does
+
+const stageTitle = (idx) => `STAGE ${STAGES[idx].id}`;
+
+// Squad HUD: one block per soldier slot, built once. Each block is a health bar (updated by
+// updateHud on damage) over a thin ammo strip (updated every frame by updateAmmoHud).
+const squadBarEls = Array.from({ length: SQUAD_MAX }, () => {
+  const el = document.createElement('div');
+  el.className = 'soldier';
+  const hp = document.createElement('div');
+  hp.className = 'bar hp';
+  const fill = document.createElement('i');
+  hp.appendChild(fill);
+  const ammo = document.createElement('div');
+  ammo.className = 'ammo';
+  const ammoFill = document.createElement('i');
+  ammo.appendChild(ammoFill);
+  el.append(hp, ammo);
+  ui.squadBars.appendChild(el);
+  return { el, hp, fill, ammo, ammoFill, lastAmmo: -1, lastReloading: false };
+});
+
+// Runs every frame, so it only writes to the DOM when a strip's value changes by a visible step.
+function updateAmmoHud() {
+  for (let k = 0; k < player.size; k++) {
+    const s = squad[k], bar = squadBarEls[k];
+    const reloading = s.reloadT > 0;
+    const f = reloading ? 1 - s.reloadT / player.weapon.reloadTime : s.ammo / player.weapon.magSize;
+    const q = Math.round(f * 40) / 40;
+    if (q !== bar.lastAmmo) { bar.ammoFill.style.transform = `scaleX(${q})`; bar.lastAmmo = q; }
+    if (reloading !== bar.lastReloading) { bar.ammo.classList.toggle('reloading', reloading); bar.lastReloading = reloading; }
+  }
+}
 
 function showToast(text, color) {
   const el = document.createElement('div');
@@ -1096,19 +1339,30 @@ function updatePowersHud() {
 // Event-driven HUD refresh (kills, hits, pickups) — not called every frame.
 function updateHud() {
   ui.squad.textContent = `x${player.size}`;
-  ui.enemyFill.style.transform = `scaleX(${N ? remaining / N : 0})`;
+  ui.enemyFill.style.transform = `scaleX(${stageTotal ? remaining / stageTotal : 0})`;
   ui.enemyCount.textContent = remaining;
   ui.bossBar.classList.toggle('hidden', !boss.active || boss.state === 0);
   ui.bossFill.style.transform = `scaleX(${Math.max(0, boss.hp) / boss.maxHp})`;
-  ui.hpFill.style.transform = `scaleX(${Math.min(1, Math.max(0, player.hp) / CFG.playerHp)})`;
+  // one mini bar per living soldier, in squad order
+  for (let k = 0; k < SQUAD_MAX; k++) {
+    const bar = squadBarEls[k];
+    const alive = k < player.size;
+    bar.el.hidden = !alive;
+    if (alive) {
+      const f = Math.max(0, squad[k].hp) / CFG.soldierHp;
+      bar.fill.style.transform = `scaleX(${f})`;
+      bar.hp.classList.toggle('low', f < 0.35);
+    }
+  }
   ui.kills.textContent = `${kills} kills`;
-  ui.stage.textContent = `${LEVELS[levelIdx].title} / ${LEVELS.length}`;
+  ui.stage.textContent = `${stageTitle(stageIdx)} / ${STAGES.length}`;
 }
 
 function killEnemy(i, byPlayer) {
   E.state[i] = 2;
   E.t[i] = 0;
   remaining--;
+  W.alive[E.wave[i]]--;
   if (byPlayer) kills++;
   spawnParticles(E.x[i], 1.0, E.z[i], 6, skinColors[i].getHex(), 4);
   spawnParticles(E.x[i], 0.9, E.z[i], 4, 0x9b1b1b, 3.5);
@@ -1116,43 +1370,126 @@ function killEnemy(i, byPlayer) {
   checkWin();
 }
 
+// `remaining` counts every enemy of the stage, including waves not started yet and queued
+// reinforcements, so it only reaches 0 when the whole stage has been fought.
 function checkWin() {
-  if (state === 'play' && remaining <= 0 && boss.state !== 1) endLevel(true);
+  if (state === 'play' && remaining <= 0 && boss.state !== 1) endStage(true);
 }
 
 let hurtTimer = 0;
-function hurtPlayer(dmg) {
-  if (state !== 'play') return;
-  player.hp -= dmg;
+// Damages living soldier k (an index into squad[0 .. player.size-1]).
+function damageSoldier(k, dmg) {
+  if (state !== 'play' || k >= player.size) return;
+  const s = squad[k];
+  s.hp -= dmg;
   shake = Math.max(shake, 0.35);
   ui.hurt.classList.add('on');
   clearTimeout(hurtTimer);
   hurtTimer = setTimeout(() => ui.hurt.classList.remove('on'), 90);
+  spawnParticles(s.px, 1.2, s.pz, 5, 0xc0392b, 3);
+  if (s.hp <= 0) fallSoldier(k);
   updateHud();
-  if (player.hp <= 0) endLevel(false);
+  if (player.size === 0) endStage(false);
+}
+
+// Soldier k falls: swap it with the last living soldier so the living ones stay contiguous,
+// then shrink the squad. The fallen soldier animates from the tail (see updateFallen).
+function fallSoldier(k) {
+  const last = player.size - 1;
+  const fallen = squad[k];
+  squad[k] = squad[last];
+  squad[last] = fallen;
+  // keep squadPos aligned with the swap until updatePlayer rewrites it next frame
+  const p = squadPos[k]; squadPos[k] = squadPos[last]; squadPos[last] = p;
+  player.size--;
+  fallen.dying = true;
+  fallen.t = 0;
+  fallen.flash.visible = false;
+  spawnParticles(fallen.px, 1.0, fallen.pz, 14, 0x2f5fd0, 4);
+  if (player.size > 0) showToast('SOLDIER DOWN', '#ff6b5e');
+}
+
+// Brings soldier slot `player.size` to life at full health, at (x, z).
+function reviveSoldier(x, z) {
+  const s = squad[player.size];
+  s.hp = CFG.soldierHp;
+  s.dying = false;
+  s.t = 0;
+  s.px = x; s.pz = z;
+  s.ammo = player.weapon.magSize;
+  s.reloadT = 0;
+  s.gun.rotation.set(0, 0, 0);
+  s.group.rotation.set(0, 0, 0);
+  s.group.position.set(x, 0, z);
+  s.group.visible = s.blob.visible = true;
+  player.size++;
+}
+
+// Death animation of fallen soldiers: tip backwards (they face -z, so +x pitch), lie still,
+// sink, then hide.
+function updateFallen(dt) {
+  for (let k = player.size; k < SQUAD_MAX; k++) {
+    const s = squad[k];
+    if (!s.dying) continue;
+    s.t += dt;
+    s.group.rotation.x = Math.min(s.t / 0.35, 1) * Math.PI / 2;
+    s.group.position.y = -Math.max(0, s.t - 1.0) * 1.2;
+    if (s.t > 1.8) {
+      s.dying = false;
+      s.group.visible = s.blob.visible = false;
+    }
+  }
 }
 
 // carry: squad size brought in from the previous stage (earned soldiers are kept)
-function setupLevel(idx, carry = 0) {
-  levelIdx = idx;
-  const lv = LEVELS[idx];
-  const bossZ = spawnFormation(lv);
-  if (lv.boss) spawnBoss(lv, bossZ); else hideBoss();
+function setupStage(idx, carry = 0) {
+  stageIdx = idx;
+  const st = STAGES[idx];
+  resetEnemyPool();
+  hideBoss();
+  W.queue.length = 0;
+  W.alive.length = 0;
+  W.timer = 0;
+  W.rowTimer = 0;
+  startWave(0); // wave 1 is on the bridge from the start (it shows behind the menu too)
+  W.next = 1;
+  stageTotal = stageEnemyTotal(st);
   B.on.fill(0);
   PT.life.fill(0);
   player.x = player.targetX = player.prevX = 0;
-  player.hp = CFG.playerHp;
   player.fireT = 0;
-  player.size = levelStartSize = Math.min(SQUAD_MAX, Math.max(lv.squad, carry));
   player.rapidT = player.pierceT = 0;
-  squad.forEach((s, k) => {
-    s.group.visible = s.blob.visible = k < player.size;
-  });
+  // every stage starts with a healthy squad, placed straight in formation
+  const size = stageStartSize = Math.min(SQUAD_MAX, Math.max(st.squad, carry));
+  const layout = squadLayout(size);
+  player.size = 0;
+  for (const s of squad) {
+    s.dying = false;
+    s.group.visible = s.blob.visible = false;
+  }
+  player.weapon.magSize = weaponMods.magSize ?? CFG.magSize;
+  player.weapon.reloadTime = weaponMods.reloadTime ?? CFG.reloadTime;
+  for (const [ox, oz] of layout) reviveSoldier(player.x + ox, player.z + oz);
+  // Stagger: each soldier starts at a different point of the fire-and-reload cycle, evenly spread
+  // over the whole cycle (period P = magazine time + reload). With reloads spread like that they
+  // can't all overlap while the reload is shorter than P, so the squad never goes silent at once.
+  // Soldier k starts `off` seconds into its cycle: still firing with fewer rounds, or reloading.
+  const fi = st.fireInterval, mag = player.weapon.magSize, reload = player.weapon.reloadTime;
+  const fireDur = mag * fi, period = fireDur + reload;
+  for (let k = 1; k < player.size; k++) {
+    const off = (period * k) / player.size;
+    if (off < fireDur) {
+      squad[k].ammo = Math.max(1, mag - Math.floor(off / fi));
+    } else {
+      squad[k].ammo = 0;
+      squad[k].reloadT = period - off;
+    }
+  }
   clearPanels();
   // a few panels already on their way so the edges are populated from the start
-  for (const z of [-24, -50, -75]) spawnPanel(z);
+  if (panelsEnabled) for (const z of [-24, -50, -75]) spawnPanel(z);
   kills = 0;
-  remaining = N;
+  remaining = stageTotal;
   updateHud();
 }
 
@@ -1165,13 +1502,13 @@ function showBanner(title, text) {
   bannerTimer = setTimeout(() => ui.banner.classList.remove('on'), 2200);
 }
 
-function startLevel(idx, carry = 0) {
-  setupLevel(idx, carry);
+function startStage(idx, carry = 0) {
+  setupStage(idx, carry);
   state = 'play';
   ui.overlay.classList.add('hidden');
-  const lv = LEVELS[idx];
+  const st = STAGES[idx];
   const squadText = player.size > 1 ? ` · your squad: ${player.size} soldiers` : '';
-  showBanner(lv.title, lv.text + squadText);
+  showBanner(stageTitle(idx), `${st.name} · ${st.text}${squadText}`);
 }
 
 function showOverlay(title, text, btn, action) {
@@ -1182,19 +1519,20 @@ function showOverlay(title, text, btn, action) {
   ui.overlay.classList.remove('hidden');
 }
 
-function endLevel(won) {
+function endStage(won) {
   state = won ? 'win' : 'lose';
-  const last = levelIdx === LEVELS.length - 1;
+  const last = stageIdx === STAGES.length - 1;
   // short delay so the final death / explosion is visible before the overlay
   setTimeout(() => {
     if (!won) {
-      showOverlay('DEFEAT', `The horde overran you in ${LEVELS[levelIdx].title.toLowerCase()} · ${kills} kills`,
-        'RETRY', () => startLevel(levelIdx, levelStartSize));
+      showOverlay('DEFEAT', `The horde overran you in ${stageTitle(stageIdx).toLowerCase()} · ${kills} kills`,
+        'RETRY', () => startStage(stageIdx, stageStartSize));
     } else if (last) {
-      showOverlay('TOTAL VICTORY!', 'You defeated the horde and the giant', 'PLAY AGAIN', () => startLevel(0));
+      showOverlay('TOTAL VICTORY!', 'You held the bridge through every stage', 'PLAY AGAIN', () => startStage(0));
     } else {
-      showOverlay(`${LEVELS[levelIdx].title} CLEARED!`, `${kills} kills · next: ${LEVELS[levelIdx + 1].text}`,
-        'NEXT STAGE', () => startLevel(levelIdx + 1, player.size));
+      const next = STAGES[stageIdx + 1];
+      showOverlay(`${stageTitle(stageIdx)} CLEARED!`, `${kills} kills · next: ${next.name}, ${next.text}`,
+        'NEXT STAGE', () => startStage(stageIdx + 1, player.size));
     }
   }, won ? 800 : 900);
 }
@@ -1232,9 +1570,9 @@ const clock = new THREE.Clock();
 
 function updatePlayer(dt) {
   const playing = state === 'play';
-  const lv = LEVELS[levelIdx];
+  const st = STAGES[stageIdx];
   const layout = squadLayout(player.size);
-  const halfSpan = Math.max(...layout.map(([ox]) => Math.abs(ox)));
+  const halfSpan = layout.length ? Math.max(...layout.map(([ox]) => Math.abs(ox))) : 0;
   if (playing) {
     player.rapidT = Math.max(0, player.rapidT - dt);
     player.pierceT = Math.max(0, player.pierceT - dt);
@@ -1246,43 +1584,67 @@ function updatePlayer(dt) {
   player.targetX += dir * 11 * dt;
   // a wider squad can move less so its outer soldiers stay on the road
   const lim = HALF_W - 0.7 - halfSpan;
+  if (player.sweep) player.targetX = Math.sin(time * 0.9) * lim; // ?debug autopilot
   player.targetX = THREE.MathUtils.clamp(player.targetX, -lim, lim);
   player.prevX = player.x;
   player.x += (player.targetX - player.x) * Math.min(1, dt * 14);
 
   const vel = (player.x - player.prevX) / Math.max(dt, 1e-4);
   const moveAmt = Math.min(1, Math.abs(vel) / 5);
-  squadPos.length = 0;
 
   layout.forEach(([ox, oz], k) => {
     const s = squad[k];
-    const x = player.x + ox, z = player.z + oz;
-    squadPos.push({ x, z });
+    // ease towards the layout slot: closes gaps left by fallen soldiers and walks recruits in
+    const tx = player.x + ox, tz = player.z + oz;
+    const ease = Math.min(1, dt * 10);
+    s.px += (tx - s.px) * ease;
+    s.pz += (tz - s.pz) * ease;
+    squadPos[k].x = s.px;
+    squadPos[k].z = s.pz;
+    // a soldier still walking to its slot animates its legs even if the squad stands still
+    const moving = Math.max(moveAmt, Math.min(1, Math.hypot(tx - s.px, tz - s.pz) * 3));
     const t = time * 14 + k * 1.3; // per-soldier phase offset so they don't step in unison
-    s.group.position.set(x, Math.abs(Math.sin(t)) * 0.05 * moveAmt, z);
+    s.group.position.set(s.px, Math.abs(Math.sin(t)) * 0.05 * moving, s.pz);
     s.group.rotation.z = THREE.MathUtils.lerp(s.group.rotation.z, -vel * 0.02, 0.2); // lean into the strafe
-    const legSwing = Math.sin(t) * 0.6 * moveAmt;
+    const legSwing = Math.sin(t) * 0.6 * moving;
     s.legs[0].rotation.x = legSwing;
     s.legs[1].rotation.x = -legSwing;
     s.recoil = Math.max(0, s.recoil - dt * 18);
     s.gun.position.z = -0.35 + s.recoil * 0.08;
+    // Reload: count down, refill at the end. Meanwhile the rifle dips and rolls (a bump that
+    // peaks halfway through the reload) so the pause in fire reads as a reload, not a bug.
+    if (s.reloadT > 0) {
+      if (playing) s.reloadT -= dt;
+      if (s.reloadT <= 0) { s.reloadT = 0; s.ammo = player.weapon.magSize; }
+      const bump = Math.sin((1 - s.reloadT / player.weapon.reloadTime) * Math.PI);
+      s.gun.rotation.set(-0.5 * bump, 0, 0.6 * bump);
+    } else if (s.gun.rotation.x !== 0) {
+      s.gun.rotation.set(0, 0, 0);
+    }
     s.flashT -= dt;
     s.flash.visible = s.flashT > 0;
     if (s.flash.visible) {
       s.flash.scale.setScalar(rand(0.6, 1.1));
       s.flash.material.rotation = rand(0, Math.PI);
     }
-    s.blob.position.set(x, 0.01, z);
+    s.blob.position.set(s.px, 0.01, s.pz);
   });
+  updateFallen(dt);
 
   if (playing) {
     // Fixed-interval firing with an accumulator: a slow frame fires several volleys
     // instead of silently lowering the fire rate.
     player.fireT -= dt;
     while (player.fireT <= 0) {
-      // outer soldiers angle slightly outwards to cover more of the road
-      layout.forEach(([ox], k) => fire(squad[k], ox * 0.05));
-      player.fireT += lv.fireInterval * (player.rapidT > 0 ? 0.5 : 1);
+      // Each soldier with rounds left fires one shot per volley; the last round starts its
+      // reload. Outer soldiers angle slightly outwards to cover more of the road.
+      layout.forEach(([ox], k) => {
+        const s = squad[k];
+        if (s.reloadT > 0) return;
+        fire(s, ox * 0.05);
+        if (--s.ammo <= 0) s.reloadT = player.weapon.reloadTime;
+      });
+      player.fireT += st.fireInterval * (player.rapidT > 0 ? 0.5 : 1);
     }
   }
 }
@@ -1303,22 +1665,28 @@ function updateScenery(dt) {
   }
 }
 
-function frame() {
-  // clamp dt so a background tab or a hitch doesn't teleport everything
-  const dt = Math.min(clock.getDelta(), 0.05);
+// One simulation step. Kept apart from rendering so ?debug can drive the game without frames.
+function simulate(dt) {
   time += dt;
   const playing = state === 'play';
-
   updatePlayer(dt);
   updatePanels(dt, playing);
   updateEnemies(dt, playing);
+  if (playing) updateWaves(dt);
   updateBoss(dt, playing);
   updateBullets(dt);
   updateParticles(dt);
   updateScenery(dt);
+}
+
+function frame() {
+  // clamp dt so a background tab or a hitch doesn't teleport everything
+  const dt = Math.min(clock.getDelta(), 0.05);
+  simulate(dt);
   renderEnemies();
   renderBullets();
   updatePowersHud();
+  updateAmmoHud();
   updateCamera(dt);
 
   renderer.render(scene, camera);
@@ -1332,9 +1700,52 @@ fetch('version.json', { cache: 'no-store' })
   .then((v) => { if (v && v.version) $('version').textContent = `v${v.version}`; })
   .catch(() => {});
 
-// URL params: ?play starts immediately, ?level=3 jumps to a stage
+// URL params: ?play starts immediately, ?stage=3 jumps to a stage, ?cap=N lowers the active-enemy
+// cap (see resetEnemyPool) to exercise reinforcements or test performance on weak devices
 const params = new URLSearchParams(location.search);
-const startIdx = THREE.MathUtils.clamp((parseInt(params.get('level'), 10) || 1) - 1, 0, LEVELS.length - 1);
-setupLevel(startIdx);
-if (params.has('play') || params.has('level')) startLevel(startIdx);
+// (?level=N still works: it was the parameter's name before stages became data)
+const stageParam = params.get('stage') ?? params.get('level');
+const startIdx = THREE.MathUtils.clamp((parseInt(stageParam, 10) || 1) - 1, 0, STAGES.length - 1);
+setupStage(startIdx);
+if (params.has('play') || stageParam !== null) startStage(startIdx);
+// ?debug exposes the live state to the console and to automated checks
+if (params.has('debug')) {
+  window.__warIsWar = {
+    get stage() { return STAGES[stageIdx].id; }, get state() { return state; },
+    get remaining() { return remaining; }, get stageTotal() { return stageTotal; },
+    get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
+    get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
+    get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    // living soldiers' health and positions, in squad order
+    get squad() {
+      return squad.slice(0, player.size).map((s) => ({
+        hp: Math.round(s.hp), x: +s.px.toFixed(2), z: +s.pz.toFixed(2), ammo: s.ammo, reloading: s.reloadT > 0,
+      }));
+    },
+    // weapon modifiers applied from the next stage start, e.g. setWeapon({ magSize: 10 })
+    setWeapon(stats) { Object.assign(weaponMods, stats); },
+    // turn the power-up signs off (or back on) to measure things without pickups interfering
+    panels(on) { panelsEnabled = on; if (!on) clearPanels(); },
+    get fallen() { return squad.slice(player.size).filter((s) => s.dying).length; },
+    power(type) { applyPowerUp(type); },
+    // per enemy type: how many are alive and their mean z (larger z = closer to the squad)
+    typeStats() {
+      const out = {};
+      for (let i = 0; i < hi; i++) {
+        if (E.state[i] !== 1) continue;
+        const o = (out[TYPE_KEYS[E.type[i]]] ??= { alive: 0, meanZ: 0 });
+        o.meanZ = (o.meanZ * o.alive + E.z[i]) / (o.alive + 1);
+        o.alive++;
+      }
+      return out;
+    },
+    // advance the simulation by `seconds` in fixed 1/60 s steps, without rendering
+    step(seconds) { for (let t = 0; t < seconds; t += 1 / 60) simulate(1 / 60); },
+    // stage data and a starter, so checks can load a test stage (push to stages, then start it)
+    stages: STAGES,
+    start(idx) { validateStages(); startStage(idx); },
+    // stand still at x, or sweep the whole road if x is 'sweep'
+    aim(x) { player.sweep = x === 'sweep'; if (!player.sweep) player.targetX = x; },
+  };
+}
 requestAnimationFrame(frame);

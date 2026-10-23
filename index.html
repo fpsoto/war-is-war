@@ -91,6 +91,17 @@
       display: flex; align-items: center; gap: calc(8 * var(--u));
     }
     .player-bar .skull { background: var(--blue); }
+    /* one mini health bar per living soldier (built by game.js) */
+    .squad-bars { flex: 1; display: flex; gap: calc(3 * var(--u)); min-width: 0; }
+    .squad-bars .soldier { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .squad-bars .soldier[hidden] { display: none; }
+    .squad-bars .bar { flex: none; min-width: 0; height: calc(14 * var(--u)); }
+    .squad-bars .bar.low > i { background: linear-gradient(#ffb36b, #e5262b 60%, #a8141a); }
+    /* ammo strip: gold while there are rounds; grey filling up while reloading */
+    .squad-bars .ammo { position: relative; height: calc(5 * var(--u)); min-height: 3px;
+      background: rgba(15,26,46,.55); border-radius: 2px; overflow: hidden; }
+    .squad-bars .ammo > i { position: absolute; inset: 0; transform-origin: left center; background: #ffd23a; }
+    .squad-bars .ammo.reloading > i { background: #c9d3df; }
     .kills {
       font-size: calc(22 * var(--u)); text-shadow: 0 2px 0 var(--ink); white-space: nowrap;
     }
@@ -216,7 +227,7 @@
     <div class="bottom">
       <div class="player-bar">
         <div class="skull">♥</div>
-        <div class="bar hp"><i id="hpFill"></i></div>
+        <div class="squad-bars" id="squadBars"></div>
         <div class="squad" id="squadCount">x1</div>
       </div>
       <div class="kills" id="kills">0 kills</div>
