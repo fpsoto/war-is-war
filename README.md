@@ -59,9 +59,11 @@ Then open the printed URL. Handy URL parameters:
 ## Project structure
 
 ```
-index.html   HUD, overlays and responsive CSS; loads Three.js via an import map
-game.js      the whole game: scene, squad, enemies, boss, bullets, power-ups, loop
-.nojekyll    tells GitHub Pages to serve the files as-is
+index.html             HUD, overlays and responsive CSS; loads Three.js via an import map
+game.js                the whole game: scene, squad, enemies, boss, bullets, power-ups, loop
+docs/level-design.md   the 30-stage campaign design
+.github/               issue and PR templates, CI and the release workflow
+.nojekyll              tells GitHub Pages to serve the files as-is
 ```
 
 ## Tuning
@@ -92,6 +94,12 @@ The game has to animate 500+ enemies at 60 fps, including on phones:
   The game ships no image files.
 - **Responsive camera.** The camera distance is computed from the horizontal field of view,
   so the full width of the road fits on any aspect ratio.
+
+## Roadmap
+
+The game is growing into a 30-stage campaign with 12 enemy types, boss fights, upgrades and an
+endless mode. The full design is in [docs/level-design.md](docs/level-design.md). The work is
+planned sprint by sprint in the "War is War" GitHub Project, with milestones `v0.2.0` to `v0.7.0`.
 
 ## Development workflow
 
