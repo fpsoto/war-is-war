@@ -92,12 +92,14 @@ export const STAGES = [
     squad: 1, pace: 1.0, fireInterval: 0.07, contactDamage: 5,
     reward: { type: 'none' },
     waves: [
-      { enemies: { soldier: 100 }, formation: { cols: 10, spacingX: 1.1, spacingZ: 1.8, startZ: -34 } },
+      // narrower than the road: the introduction only asks for small sweeps to cover it
+      { enemies: { soldier: 100 }, formation: { cols: 8, spacingX: 0.9, spacingZ: 1.8, startZ: -34 } },
     ],
   },
   {
     id: 2, name: 'The Bridge', text: '500 soldiers wall to wall',
-    squad: 2, pace: 0.8, fireInterval: 0.06, contactDamage: 4,
+    // 500 enemies wall to wall: low contact damage so it's about covering the width, not one leak
+    squad: 2, pace: 0.8, fireInterval: 0.06, contactDamage: 2.5,
     reward: { type: 'fireRateBoost', amount: 0.15, temporary: true },
     waves: [
       { enemies: { soldier: 500 }, formation: { cols: 14, fullWidth: true, spacingZ: 0.95, startZ: -32 } },
@@ -105,7 +107,7 @@ export const STAGES = [
   },
   {
     id: 3, name: 'The Brute', text: '500 soldiers and a giant',
-    squad: 3, pace: 0.75, fireInterval: 0.06, contactDamage: 4,
+    squad: 3, pace: 0.75, fireInterval: 0.06, contactDamage: 3,
     reward: { type: 'armorPiercing' },
     waves: [
       {
@@ -117,9 +119,11 @@ export const STAGES = [
   },
   // Stages 4-6 teach one new enemy at a time (docs/level-design.md §3): runners, then heavies,
   // then both together. Each is split in waves so the new type gets a small first wave to read.
+  // They bring fewer enemies than stages 2-3, so contact damage is higher (10): measured with the
+  // ?debug autopilot, standing still loses, sweeping half the road wins hurt, full sweeps win clean.
   {
     id: 4, name: 'Fast Approach', text: 'Runners sprint ahead of the line: drop them first',
-    squad: 3, pace: 0.9, fireInterval: 0.06, contactDamage: 4,
+    squad: 3, pace: 0.9, fireInterval: 0.06, contactDamage: 10,
     reward: { type: 'reloadSpeed', amount: 0.2 },
     waves: [
       { enemies: { soldier: 50, runner: 6 }, formation: { cols: 10, spacingX: 1.1, spacingZ: 1.6, startZ: -34 } },
@@ -128,7 +132,7 @@ export const STAGES = [
   },
   {
     id: 5, name: 'Iron Wall', text: 'Armored heavies shrug off bullets: focus your fire',
-    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 4,
+    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 10,
     reward: { type: 'rifleUpgrade', damage: 0.15 },
     waves: [
       { enemies: { soldier: 60, heavy: 6 }, formation: { cols: 10, spacingX: 1.1, spacingZ: 1.5, startZ: -34 } },
@@ -137,7 +141,7 @@ export const STAGES = [
   },
   {
     id: 6, name: 'Broken Formation', text: 'Runners in front, heavies behind: watch both',
-    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 4,
+    squad: 3, pace: 0.85, fireInterval: 0.06, contactDamage: 10,
     reward: { type: 'grenade', charges: 1 },
     waves: [
       { enemies: { soldier: 50, runner: 10 }, formation: { cols: 12, fullWidth: true, spacingZ: 1.4, startZ: -34 } },

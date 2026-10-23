@@ -31,7 +31,11 @@ const CFG = {
   reloadTime: 0.9,        // seconds to reload an empty magazine
   spread: 0.03,           // random aim jitter in radians
   soldierHp: 100,         // health of each squad member (durability upgrades in #17 raise it)
-  funnelDist: 14,         // at this distance the formation breaks and rushes the squad
+  funnelDist: 14,         // at this distance the formation breaks and closes in on the squad
+  // How far an enemy drifts from its lane towards the squad by the time it arrives (0 = keeps
+  // its lane, 1 = converges on the nearest soldier). Below 1, flank enemies pass beside the squad
+  // and hurt it unless the player moves to shoot them.
+  funnelPull: 0.5,
 };
 const HALF_W = CFG.roadWidth / 2;
 
@@ -379,6 +383,7 @@ const E = {
   state: new Uint8Array(MAX_E), // 0 free, 1 alive, 2 dying (the slot is released when the fall ends)
   t: new Float32Array(MAX_E), flash: new Float32Array(MAX_E),
   wave: new Int8Array(MAX_E),   // index of the wave the enemy belongs to
+  lane: new Float32Array(MAX_E), // x of its place in the formation; it drifts from there towards the squad
   type: new Uint8Array(MAX_E),  // index into TYPES
 };
 
@@ -493,6 +498,7 @@ function spawnEnemy(type, x, z, wave, phase) {
   const t = TYPES[ti];
   E.type[i] = ti;
   E.x[i] = x;
+  E.lane[i] = x;
   E.z[i] = z;
   E.vx[i] = 0;
   // same speed for every enemy of a type keeps its part of the formation intact
@@ -689,14 +695,17 @@ function updateEnemies(dt, playing) {
     if (s === 0) continue;
     if (s === 1) {
       if (playing && player.size > 0) {
-        // Funnel: march straight while far, then steer harder towards the nearest
-        // soldier as the distance shrinks. This drags the crowd into the line of fire.
+        // Funnel: march straight while far, then drift from the lane towards the nearest soldier
+        // as the distance shrinks, reaching `funnelPull` of the way on arrival. Enemies close to
+        // the squad's column still collide with it; flank enemies pass beside it (and hurt it as
+        // leakers), so the player has to sweep across to stop them.
         const distToPlayer = player.z - E.z[i];
         let vx = 0;
         if (distToPlayer < CFG.funnelDist) {
           const pull = 1 - Math.max(0, distToPlayer) / CFG.funnelDist; // 0 → 1 while approaching
-          const tx = squadPos[nearestSoldier(E.x[i])].x;
-          vx = THREE.MathUtils.clamp((tx - E.x[i]) * 1.2, -2.2, 2.2) * pull;
+          const sx = squadPos[nearestSoldier(E.x[i])].x;
+          const tx = E.lane[i] + (sx - E.lane[i]) * CFG.funnelPull * pull;
+          vx = THREE.MathUtils.clamp((tx - E.x[i]) * 2.0, -2.2, 2.2);
         }
         E.vx[i] += (vx - E.vx[i]) * Math.min(1, dt * 4); // smoothed steering
         E.x[i] += (E.vx[i] + E.sepX[i]) * dt;
@@ -1615,7 +1624,7 @@ function updatePlayer(dt) {
   player.targetX += dir * 11 * dt;
   // a wider squad can move less so its outer soldiers stay on the road
   const lim = HALF_W - 0.7 - halfSpan;
-  if (player.sweep) player.targetX = Math.sin(time * 0.9) * lim; // ?debug autopilot
+  if (player.sweep) player.targetX = Math.sin(time * 0.9) * lim * player.sweep; // ?debug autopilot
   player.targetX = THREE.MathUtils.clamp(player.targetX, -lim, lim);
   player.prevX = player.x;
   player.x += (player.targetX - player.x) * Math.min(1, dt * 14);
@@ -1749,6 +1758,7 @@ if (params.has('debug')) {
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
     // difficulty tiers (mutable, for checks) and the values applied to the current stage
     tiers: DIFFICULTY_TIERS,
+    cfg: CFG, // mutable, for tuning experiments
     get mods() { return { tier: stageMods.tier.stages, speed: stageMods.speed, soldierHp: stageMods.soldierHp }; },
     // living soldiers' health and positions, in squad order
     get squad() {
@@ -1779,7 +1789,8 @@ if (params.has('debug')) {
     stages: STAGES,
     start(idx) { validateStages(); startStage(idx); },
     // stand still at x, or sweep the whole road if x is 'sweep'
-    aim(x) { player.sweep = x === 'sweep'; if (!player.sweep) player.targetX = x; },
+    // 'sweep' covers the whole road; aim('sweep', 0.5) sweeps half of it, like a sloppier player
+    aim(x, amplitude = 1) { player.sweep = x === 'sweep' ? amplitude : 0; if (!player.sweep) player.targetX = x; },
   };
 }
 requestAnimationFrame(frame);
