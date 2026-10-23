@@ -27,6 +27,7 @@ const CFG = {
   waveDowntime: 6,        // default seconds between waves (stages can override per wave)
   bulletSpeed: 55,
   bulletRange: 95,
+  bulletDamage: 1,        // before armor; weapon upgrades (#17) raise it
   spread: 0.03,           // random aim jitter in radians
   playerHp: 100,
   funnelDist: 14,         // at this distance the formation breaks and rushes the squad
@@ -353,11 +354,23 @@ const E = {
   x: new Float32Array(MAX_E), z: new Float32Array(MAX_E),
   vx: new Float32Array(MAX_E), sepX: new Float32Array(MAX_E), sepZ: new Float32Array(MAX_E),
   speed: new Float32Array(MAX_E), phase: new Float32Array(MAX_E), scale: new Float32Array(MAX_E),
-  yaw: new Float32Array(MAX_E), hp: new Int8Array(MAX_E),
+  yaw: new Float32Array(MAX_E),
+  hp: new Float32Array(MAX_E),  // fractional: armor scales the damage of each hit
   state: new Uint8Array(MAX_E), // 0 free, 1 alive, 2 dying (the slot is released when the fall ends)
   t: new Float32Array(MAX_E), flash: new Float32Array(MAX_E),
   wave: new Int8Array(MAX_E),   // index of the wave the enemy belongs to
+  type: new Uint8Array(MAX_E),  // index into TYPES
 };
+
+// Enemy types from stages.js, indexed so the hot loops read TYPES[E.type[i]] instead of looking
+// up strings. Palettes are turned into THREE.Color objects once, here, not on every spawn.
+const TYPE_KEYS = Object.keys(ENEMY_TYPES);
+const TYPES = TYPE_KEYS.map((k) => ENEMY_TYPES[k]);
+const TYPE_INDEX = Object.fromEntries(TYPE_KEYS.map((k, i) => [k, i]));
+const TYPE_COLORS = TYPES.map((t) => ({
+  body: t.body.map((c) => new THREE.Color(c)),
+  skin: t.skin.map((c) => new THREE.Color(c)),
+}));
 
 // Enemy pool. Free slot indices live on a stack, so spawning and releasing are O(1) and never
 // allocate. Slots are handed out lowest-first and `hi` tracks the highest slot used this stage:
@@ -415,17 +428,22 @@ const parts = {
 };
 parts.legR = makeInst(parts.legL.geometry, parts.legL.material);
 parts.armR = makeInst(parts.armL.geometry, parts.armL.material);
+// Armor parts, drawn only for `plated` types (Heavy). Every other instance gets the zero matrix,
+// so adding armor costs two draw calls total, not one per armored enemy.
+const armorMat = new THREE.MeshLambertMaterial({ color: 0x8a919b });
+parts.helmet = makeInst(new THREE.SphereGeometry(0.26, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), armorMat);
+parts.plate = makeInst(new THREE.BoxGeometry(0.6, 0.5, 0.1), armorMat);
 
-const CLOTHES = ['#5b7a3a', '#55703a', '#4f6a36', '#62803f', '#5a7444'];
-const SKINS = ['#7fa15a', '#8bb06a', '#6e9450', '#94b874'];
+// Per-slot base colors. A slot is recolored from its type's palette whenever an enemy spawns in it.
 for (let i = 0; i < MAX_E; i++) {
-  bodyColors.push(new THREE.Color(CLOTHES[(i * 3) % CLOTHES.length]));
-  skinColors.push(new THREE.Color(SKINS[(i * 7) % SKINS.length]));
+  bodyColors.push(new THREE.Color());
+  skinColors.push(new THREE.Color());
   parts.torso.setColorAt(i, bodyColors[i]);
   parts.head.setColorAt(i, skinColors[i]);
   parts.armL.setColorAt(i, skinColors[i]);
   parts.armR.setColorAt(i, skinColors[i]);
 }
+let armColorsDirty = false; // arm colors only change on spawn, so they're uploaded only then
 
 // ---------- Stage manager and wave spawner ----------
 // A stage (stages.js) is a list of waves. Wave 1 is laid out when the stage is set up; each later
@@ -444,28 +462,34 @@ let stageTotal = 0; // enemies the whole stage brings, across all waves (bosses 
 function spawnEnemy(type, x, z, wave, phase) {
   const i = allocEnemy();
   if (i < 0) return false;
-  const t = ENEMY_TYPES[type];
+  const ti = TYPE_INDEX[type];
+  const t = TYPES[ti];
+  E.type[i] = ti;
   E.x[i] = x;
   E.z[i] = z;
   E.vx[i] = 0;
-  // same speed for every enemy of a type keeps the formation intact
+  // same speed for every enemy of a type keeps its part of the formation intact
   E.speed[i] = t.speed * STAGES[stageIdx].pace;
   E.phase[i] = phase;
-  E.scale[i] = rand(0.95, 1.05);
+  E.scale[i] = t.scale * rand(0.95, 1.05);
   E.hp[i] = t.hp;
   E.state[i] = 1;
   E.t[i] = 0;
   E.flash[i] = 0;
   E.yaw[i] = 0;
   E.wave[i] = wave;
+  const pal = TYPE_COLORS[ti];
+  bodyColors[i].copy(pal.body[i % pal.body.length]);
+  skinColors[i].copy(pal.skin[(i * 7) % pal.skin.length]);
+  parts.armL.setColorAt(i, skinColors[i]);
+  parts.armR.setColorAt(i, skinColors[i]);
+  armColorsDirty = true;
   return true;
 }
 
-// Expands { soldier: 120, runner: 20 } into the order the formation is filled. Types are spread
-// proportionally (like Bresenham's line algorithm) so a mixed wave doesn't arrive as one block
-// per type. Runs once per wave, outside the frame loop.
-function waveRoster(wave) {
-  const entries = Object.entries(wave.enemies);
+// Spreads counts proportionally (like Bresenham's line algorithm): { a: 3, b: 1 } -> a a b a.
+function spread(counts) {
+  const entries = Object.entries(counts);
   const total = entries.reduce((a, [, n]) => a + n, 0);
   const placed = entries.map(() => 0);
   const out = [];
@@ -479,6 +503,17 @@ function waveRoster(wave) {
     out.push(entries[best][0]);
   }
   return out;
+}
+
+// Expands { soldier: 120, runner: 20 } into the order the formation is filled, front row first.
+// Each type goes to its `placement` band. Fast types fill the front rows and slow types the back,
+// so speed differences open gaps instead of making enemies walk through each other (separation
+// only runs near the squad). Within a band, types are spread proportionally so a mixed band
+// doesn't arrive as one block per type. Runs once per wave, outside the frame loop.
+function waveRoster(wave) {
+  const bands = { front: {}, mixed: {}, back: {} };
+  for (const [type, n] of Object.entries(wave.enemies)) bands[ENEMY_TYPES[type].placement][type] = n;
+  return [...spread(bands.front), ...spread(bands.mixed), ...spread(bands.back)];
 }
 
 // Lays a wave out on a grid. When the wave has a boss, slots inside an ellipse around it are
@@ -631,7 +666,7 @@ function updateEnemies(dt, playing) {
           if (dx * dx + dz * dz < 0.8 * 0.8) { touched = true; break; }
         }
         if (touched) {
-          hurtPlayer(st.contactDamage);
+          hurtPlayer(st.contactDamage * TYPES[E.type[i]].contact);
           killEnemy(i, false);
         }
       }
@@ -645,7 +680,7 @@ function updateEnemies(dt, playing) {
   }
 }
 
-// Rebuilds every enemy's 6 part matrices from its state (walk cycle, death fall).
+// Rebuilds every enemy's part matrices from its state (walk cycle, lean, armor, death fall).
 function renderEnemies() {
   const P = parts;
   // only upload and draw the slots this stage has touched
@@ -656,8 +691,10 @@ function renderEnemies() {
       P.torso.setMatrixAt(i, _zero); P.head.setMatrixAt(i, _zero);
       P.legL.setMatrixAt(i, _zero); P.legR.setMatrixAt(i, _zero);
       P.armL.setMatrixAt(i, _zero); P.armR.setMatrixAt(i, _zero);
+      P.helmet.setMatrixAt(i, _zero); P.plate.setMatrixAt(i, _zero);
       continue;
     }
+    const type = TYPES[E.type[i]];
     let fall = 0, sink = 0;
     if (st === 2) {
       // fall backwards in 0.3 s, lie still, then sink through the floor
@@ -667,22 +704,38 @@ function renderEnemies() {
     }
     const ph = E.phase[i];
     const bob = st === 1 ? Math.abs(Math.sin(ph)) * 0.07 : 0;
+    // forward lean (runners) only while alive; a dying enemy falls from upright
+    const pitch = st === 1 ? type.lean : fall;
     // 'YXZ' = turn (yaw) first, then tip over (pitch) in the turned frame
-    _e.set(fall, E.yaw[i], 0, 'YXZ');
+    _e.set(pitch, E.yaw[i], 0, 'YXZ');
     _q.setFromEuler(_e);
     _e.order = 'XYZ'; // restore: _e is shared with setPart()
     const k = E.scale[i];
     _mBase.compose(_v.set(E.x[i], bob - sink, E.z[i]), _q, _s.set(k, k, k));
 
     const swing = st === 1 ? Math.sin(ph) * 0.7 : 0;
-    // zombie-style raised arms, slightly swaying
-    const armSwing = st === 1 ? Math.sin(ph * 0.5) * 0.15 : 0.6;
     setPart(P.legL, i, -0.13, 0.55, 0, swing);
     setPart(P.legR, i, 0.13, 0.55, 0, -swing);
     setPart(P.torso, i, 0, 0.86, 0, 0);
     setPart(P.head, i, 0, 1.38, 0.02, 0);
-    setPart(P.armL, i, -0.34, 1.07, 0, -0.2 + armSwing);
-    setPart(P.armR, i, 0.34, 1.07, 0, -0.2 - armSwing);
+    // Arm pitch: arms point forward (+z) at 0; positive pitch lowers them. Leaning types (runners)
+    // pump their arms down by their sides against the legs; the rest keep zombie-style raised
+    // arms with a slight sway.
+    if (st === 1 && type.lean > 0) {
+      setPart(P.armL, i, -0.34, 1.07, 0, 1.2 - swing * 0.9);
+      setPart(P.armR, i, 0.34, 1.07, 0, 1.2 + swing * 0.9);
+    } else {
+      const armSwing = st === 1 ? Math.sin(ph * 0.5) * 0.15 : 0.6;
+      setPart(P.armL, i, -0.34, 1.07, 0, -0.2 + armSwing);
+      setPart(P.armR, i, 0.34, 1.07, 0, -0.2 - armSwing);
+    }
+    if (type.plated) {
+      setPart(P.helmet, i, 0, 1.42, 0.02, 0);
+      setPart(P.plate, i, 0, 0.9, 0.17, 0);
+    } else {
+      P.helmet.setMatrixAt(i, _zero);
+      P.plate.setMatrixAt(i, _zero);
+    }
 
     // hit feedback: flash white for a few frames
     const flashing = E.flash[i] > 0;
@@ -692,6 +745,11 @@ function renderEnemies() {
   for (const key in P) P[key].instanceMatrix.needsUpdate = true;
   P.torso.instanceColor.needsUpdate = true;
   P.head.instanceColor.needsUpdate = true;
+  if (armColorsDirty) {
+    P.armL.instanceColor.needsUpdate = true;
+    P.armR.instanceColor.needsUpdate = true;
+    armColorsDirty = false;
+  }
 }
 
 // ---------- Giant (stage 3 boss) ----------
@@ -1097,14 +1155,19 @@ function updateBullets(dt) {
       continue;
     }
     if (hit >= 0) {
+      // armor blocks a fraction of every bullet's damage
+      const armor = TYPES[E.type[hit]].armor;
+      const dmg = CFG.bulletDamage * (1 - armor);
       // piercing rounds only keep flying when they actually kill the target;
       // otherwise the same tough enemy would be hit again next frame
-      if (B.pierce[b] > 0 && E.hp[hit] <= 1) B.pierce[b]--;
+      if (B.pierce[b] > 0 && E.hp[hit] <= dmg + 1e-6) B.pierce[b]--;
       else B.on[b] = 0;
-      E.hp[hit]--;
+      E.hp[hit] -= dmg;
       E.flash[hit] = 0.08;
-      spawnParticles(B.x[b], 1.1, E.z[hit] + 0.2, 3, 0xffd36b, 3);
-      if (E.hp[hit] <= 0) killEnemy(hit, true);
+      // armored hits throw pale metal sparks instead of the usual yellow flash
+      if (armor > 0) spawnParticles(B.x[b], 1.2, E.z[hit] + 0.3, 4, 0xdfe6ee, 4.5);
+      else spawnParticles(B.x[b], 1.1, E.z[hit] + 0.2, 3, 0xffd36b, 3);
+      if (E.hp[hit] <= 1e-6) killEnemy(hit, true);
     }
   }
 }
@@ -1479,6 +1542,17 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    // per enemy type: how many are alive and their mean z (larger z = closer to the squad)
+    typeStats() {
+      const out = {};
+      for (let i = 0; i < hi; i++) {
+        if (E.state[i] !== 1) continue;
+        const o = (out[TYPE_KEYS[E.type[i]]] ??= { alive: 0, meanZ: 0 });
+        o.meanZ = (o.meanZ * o.alive + E.z[i]) / (o.alive + 1);
+        o.alive++;
+      }
+      return out;
+    },
     // advance the simulation by `seconds` in fixed 1/60 s steps, without rendering
     step(seconds) { for (let t = 0; t < seconds; t += 1 / 60) simulate(1 / 60); },
     // stage data and a starter, so checks can load a test stage (push to stages, then start it)
