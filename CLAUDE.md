@@ -30,8 +30,9 @@ Issues and PRs share one number sequence. Labels: `feature`, `bug`, `chore`, plu
 
 ### Sprints and the project board
 
-- Every issue and PR is **assigned to `fpsoto`**, gets the milestone of the version it targets, and is added to the GitHub Project **"War is War"** (owner `fpsoto`) with **Status** (Todo / In Progress / Done), **Priority** (Critical / High / Medium / Low) and **Sprint** set.
-- Sprints are **2 weeks**, Thursday to Wednesday, on the same calendar as fpsoto/fuel-control: Sprint 2 = 2026-10-22 → 2026-11-04, Sprint 3 = 2026-11-05 → 2026-11-18, and so on. Add iterations to the `Sprint` field (Project settings) before they run out.
+- Every issue and PR is **assigned to `fpsoto`**, gets the milestone of the version it targets, and is added to the GitHub Project **"War is War"** (github.com/users/fpsoto/projects/4) with **Status** (Todo / In Progress / Done), **Priority** (Critical / High / Medium / Low) and **Sprint** set. Move an issue to In Progress when its branch is created.
+- Sprints are **2 weeks**, Thursday to Wednesday, on the same calendar as fpsoto/fuel-control: Sprint 2 = 2026-10-22 → 2026-11-04, Sprint 3 = 2026-11-05 → 2026-11-18, and so on. Iterations exist up to Sprint 7 (2026-12-31 → 2027-01-13).
+  - Add new iterations **in the Project settings UI**. Updating the `Sprint` field through the GraphQL API (`updateProjectV2Field`) recreates every iteration with new ids and wipes the sprint of all existing items.
 - A sprint's issues usually target the next minor version. Its milestone carries the sprint dates in its description.
 - Issues not planned into a sprint stay without one (the backlog), with a Priority.
 
@@ -58,6 +59,8 @@ A 3D horde shooter in the browser. Static site, no build step: `index.html` (HUD
 
 - Run locally with any static server (`npx serve .`); ES modules don't load from `file://`. `?level=N` jumps to a stage, `?play` skips the start screen.
 - Balance lives in `CFG`, `LEVELS` and `POWERUPS` at the top of `game.js`.
+- **The 30-stage campaign is specified in [docs/level-design.md](docs/level-design.md)** (enemy types, stages, rewards, difficulty tiers, bosses, technical requirements). Read it before working on any campaign issue. Its §11 records how the spec is adapted to this codebase. Update §11 when an adaptation decision changes.
+- On Windows PowerShell 5.1, save helper `.ps1` scripts with a UTF-8 BOM (without one they are read as ANSI and characters like `–` break string parsing), and write issue/PR bodies to files as UTF-8 **without** BOM.
 - Performance rules (the game animates 500+ enemies on phones):
   - Enemies, bullets and particles are `InstancedMesh`es driven by typed arrays.
   - Never allocate in the game loop. Reuse the module-level scratch objects (`_v`, `_q`, `_mOut`, …).
