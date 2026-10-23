@@ -8,10 +8,35 @@
  * (mostly) cleared.
  */
 
-// Base stats per enemy type. Stages scale speed with `pace`; difficulty tiers (#15) and new
-// types (#12) build on this table.
+/*
+ * Enemy types (docs/level-design.md §2). Stages scale speed with `pace`; difficulty tiers (#15)
+ * build on this table.
+ *   hp          hits to kill at the base damage of 1
+ *   speed       units per second before the stage's pace
+ *   armor       fraction of every bullet's damage that is blocked (0 = none)
+ *   contact     multiplier on the stage's contactDamage when the enemy reaches the squad
+ *   scale       body size; lean tilts the body forward (radians) while alive
+ *   placement   where the type goes in a mixed formation: 'front' for fast types (so they rush
+ *               ahead instead of running through the ranks), 'back' for slow ones, else 'mixed'
+ *   plated      draws the armor parts (helmet and chest plate)
+ *   body, skin  color palettes; each enemy picks one entry
+ */
 export const ENEMY_TYPES = {
-  soldier: { hp: 1, speed: 2.0 },
+  soldier: {
+    hp: 1, speed: 2.0, armor: 0, contact: 1, scale: 1.0, lean: 0, placement: 'mixed', plated: false,
+    body: ['#5b7a3a', '#55703a', '#4f6a36', '#62803f', '#5a7444'],
+    skin: ['#7fa15a', '#8bb06a', '#6e9450', '#94b874'],
+  },
+  runner: {
+    hp: 1, speed: 3.4, armor: 0, contact: 1, scale: 0.88, lean: 0.3, placement: 'front', plated: false,
+    body: ['#c7702a', '#b8652a', '#d17f35'],
+    skin: ['#8bb06a', '#94b874'],
+  },
+  heavy: {
+    hp: 4, speed: 1.6, armor: 0.5, contact: 2, scale: 1.3, lean: 0, placement: 'back', plated: true,
+    body: ['#3f454f', '#474e59'],
+    skin: ['#6e9450', '#7fa15a'],
+  },
 };
 
 export const BOSS_TYPES = {
@@ -75,6 +100,16 @@ export function stageEnemyTotal(stage) {
 export function validateStages(stages = STAGES) {
   const fail = (stage, msg) => { throw new Error(`Stage ${stage?.id ?? '?'}: ${msg}`); };
   const num = (v) => typeof v === 'number' && Number.isFinite(v);
+  const color = (c) => typeof c === 'string' && /^#[0-9a-f]{6}$/i.test(c);
+  for (const [name, t] of Object.entries(ENEMY_TYPES)) {
+    const bad = (msg) => { throw new Error(`Enemy type '${name}': ${msg}`); };
+    for (const k of ['hp', 'speed', 'contact', 'scale']) if (!num(t[k]) || t[k] <= 0) bad(`${k} must be a positive number`);
+    if (!num(t.armor) || t.armor < 0 || t.armor >= 1) bad('armor must be in [0, 1)');
+    if (!num(t.lean)) bad('lean must be a number');
+    if (!['front', 'mixed', 'back'].includes(t.placement)) bad("placement must be 'front', 'mixed' or 'back'");
+    if (typeof t.plated !== 'boolean') bad('plated must be a boolean');
+    for (const k of ['body', 'skin']) if (!Array.isArray(t[k]) || !t[k].length || !t[k].every(color)) bad(`${k} must be a list of #rrggbb colors`);
+  }
   stages.forEach((s, i) => {
     if (s.id !== i + 1) fail(s, `id must be ${i + 1} (stages are numbered in order)`);
     if (!s.name || !s.text) fail(s, 'name and text are required');
