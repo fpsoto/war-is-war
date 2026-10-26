@@ -387,6 +387,9 @@ const E = {
   wave: new Int8Array(MAX_E),   // index of the wave the enemy belongs to
   lane: new Float32Array(MAX_E), // x of its place in the formation; it drifts from there towards the squad
   type: new Uint8Array(MAX_E),  // index into TYPES
+  shield: new Float32Array(MAX_E), // shield HP left (shieldbearers); 0 = no shield
+  cool: new Float32Array(MAX_E),   // ranged types: seconds until the bow starts drawing
+  draw: new Float32Array(MAX_E),   // ranged types: seconds of drawing left (> 0 = telegraphing a shot)
 };
 
 // Enemy types from stages.js, indexed so the hot loops read TYPES[E.type[i]] instead of looking
@@ -460,6 +463,11 @@ parts.armR = makeInst(parts.armL.geometry, parts.armL.material);
 const armorMat = new THREE.MeshLambertMaterial({ color: 0x8a919b });
 parts.helmet = makeInst(new THREE.SphereGeometry(0.26, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.55), armorMat);
 parts.plate = makeInst(new THREE.BoxGeometry(0.6, 0.5, 0.1), armorMat);
+// Shieldbearer's tower shield, same zero-matrix trick for everyone else. Its width (1.0) matches
+// the shield's hit width in updateBullets.
+parts.shield = makeInst(new THREE.BoxGeometry(1.0, 1.2, 0.08), new THREE.MeshLambertMaterial({ color: 0x8c6a3f }));
+// A bow held by archers: a thin vertical bar in the left hand.
+parts.bow = makeInst(new THREE.BoxGeometry(0.04, 0.9, 0.04), new THREE.MeshLambertMaterial({ color: 0x3b2614 }));
 
 // Per-slot base colors. A slot is recolored from its type's palette whenever an enemy spawns in it.
 for (let i = 0; i < MAX_E; i++) {
@@ -514,6 +522,10 @@ function spawnEnemy(type, x, z, wave, phase) {
   E.flash[i] = 0;
   E.yaw[i] = 0;
   E.wave[i] = wave;
+  E.shield[i] = t.shieldHp ?? 0;
+  // ranged types start at different points of their cycle so a line of archers doesn't volley in sync
+  E.cool[i] = t.ranged ? rand(0.5, t.ranged.every) : 0;
+  E.draw[i] = 0;
   const pal = TYPE_COLORS[ti];
   bodyColors[i].copy(pal.body[i % pal.body.length]);
   skinColors[i].copy(pal.skin[(i * 7) % pal.skin.length]);
@@ -696,6 +708,22 @@ function updateEnemies(dt, playing) {
     const s = E.state[i];
     if (s === 0) continue;
     if (s === 1) {
+      const ranged = TYPES[E.type[i]].ranged;
+      if (playing && player.size > 0 && ranged) {
+        // Ranged enemies march until they are `range` units from the squad, then hold position
+        // (still spreading with separation) and shoot. They never reach the squad themselves.
+        const distToPlayer = player.z - E.z[i];
+        const walking = distToPlayer > ranged.range;
+        if (walking) E.z[i] += E.speed[i] * dt;
+        else updateRangedAttack(i, ranged, dt);
+        E.x[i] = THREE.MathUtils.clamp(E.x[i] + E.sepX[i] * dt, -HALF_W + 0.4, HALF_W - 0.4);
+        // face the soldier they're shooting at
+        const tx = squadPos[nearestSoldier(E.x[i])].x;
+        E.yaw[i] = walking ? 0 : Math.atan2(tx - E.x[i], distToPlayer);
+        if (walking) E.phase[i] += dt * E.speed[i] * 3.6;
+        if (E.flash[i] > 0) E.flash[i] -= dt;
+        continue;
+      }
       if (playing && player.size > 0) {
         // Funnel: march straight while far, then drift from the lane towards the nearest soldier
         // as the distance shrinks, reaching `funnelPull` of the way on arrival. Enemies close to
@@ -741,6 +769,24 @@ function updateEnemies(dt, playing) {
   }
 }
 
+// Ranged attack cycle: wait (cool), then draw the bow for `draw` seconds (the telegraph the player
+// reads), then loose an arrow at where the target soldier stands *now*. The arrow doesn't lead
+// its target, so a soldier that moves during the flight is missed.
+function updateRangedAttack(i, r, dt) {
+  if (E.draw[i] > 0) {
+    E.draw[i] -= dt;
+    if (E.draw[i] <= 0) {
+      E.draw[i] = 0;
+      const k = nearestSoldier(E.x[i]);
+      fireArrow(E.x[i], 1.5 * E.scale[i], E.z[i], squadPos[k].x, squadPos[k].z, r.speed, r.damage);
+      E.cool[i] = r.every - r.draw;
+    }
+  } else {
+    E.cool[i] -= dt;
+    if (E.cool[i] <= 0) E.draw[i] = r.draw;
+  }
+}
+
 // Rebuilds every enemy's part matrices from its state (walk cycle, lean, armor, death fall).
 function renderEnemies() {
   const P = parts;
@@ -753,6 +799,7 @@ function renderEnemies() {
       P.legL.setMatrixAt(i, _zero); P.legR.setMatrixAt(i, _zero);
       P.armL.setMatrixAt(i, _zero); P.armR.setMatrixAt(i, _zero);
       P.helmet.setMatrixAt(i, _zero); P.plate.setMatrixAt(i, _zero);
+      P.shield.setMatrixAt(i, _zero); P.bow.setMatrixAt(i, _zero);
       continue;
     }
     const type = TYPES[E.type[i]];
@@ -785,6 +832,16 @@ function renderEnemies() {
     if (st === 1 && type.lean > 0) {
       setPart(P.armL, i, -0.34, 1.07, 0, 1.2 - swing * 0.9);
       setPart(P.armR, i, 0.34, 1.07, 0, 1.2 + swing * 0.9);
+    } else if (st === 1 && type.ranged) {
+      // Archer: bow arm straight out; the string arm slides back as the bow is drawn, so the
+      // draw (the telegraph before each shot) reads from a distance.
+      const d = E.draw[i] > 0 ? 1 - E.draw[i] / type.ranged.draw : 0;
+      setPart(P.armL, i, -0.3, 1.12, 0, -0.1);
+      setPart(P.armR, i, 0.2, 1.14, -0.3 * d, -0.1);
+    } else if (st === 1 && E.shield[i] > 0) {
+      // Shieldbearer: both arms forward and low, holding the shield
+      setPart(P.armL, i, -0.3, 1.0, 0, 0.35);
+      setPart(P.armR, i, 0.3, 1.0, 0, 0.35);
     } else {
       const armSwing = st === 1 ? Math.sin(ph * 0.5) * 0.15 : 0.6;
       setPart(P.armL, i, -0.34, 1.07, 0, -0.2 + armSwing);
@@ -797,6 +854,10 @@ function renderEnemies() {
       P.helmet.setMatrixAt(i, _zero);
       P.plate.setMatrixAt(i, _zero);
     }
+    if (E.shield[i] > 0 && st === 1) setPart(P.shield, i, 0, 0.95, 0.62, 0);
+    else P.shield.setMatrixAt(i, _zero);
+    if (type.ranged && st === 1) setPart(P.bow, i, -0.3, 1.12, 0.58, 0);
+    else P.bow.setMatrixAt(i, _zero);
 
     // hit feedback: flash white for a few frames
     const flashing = E.flash[i] > 0;
@@ -1198,9 +1259,12 @@ function updateBullets(dt) {
     let hit = -1, best = -Infinity;
     for (let i = 0; i < hi; i++) {
       if (E.state[i] !== 1) continue;
-      const ez = E.z[i];
+      // A raised shield is wider than the body and held in front of it, so it is hit first and
+      // also covers the enemies right behind the bearer.
+      const shielded = E.shield[i] > 0;
+      const ez = shielded ? E.z[i] + 0.62 * E.scale[i] : E.z[i];
       if (ez < zMin || ez > zMax) continue;
-      if (Math.abs(E.x[i] - B.x[b]) > 0.42 * E.scale[i]) continue;
+      if (Math.abs(E.x[i] - B.x[b]) > (shielded ? 0.5 : 0.42) * E.scale[i]) continue;
       if (ez > best) { best = ez; hit = i; }
     }
     // power-up panels take bullets too (closest target wins)
@@ -1226,7 +1290,16 @@ function updateBullets(dt) {
       hitPanel(panelHit);
       continue;
     }
-    if (hit >= 0) {
+    if (hit >= 0 && E.shield[hit] > 0) {
+      // the shield soaks the whole hit (piercing rounds stop too); splinters, then breaks
+      B.on[b] = 0;
+      E.shield[hit] -= player.weapon.damage;
+      spawnParticles(B.x[b], 1.0, E.z[hit] + 0.7, 3, 0xb08850, 3.5);
+      if (E.shield[hit] <= 0) {
+        E.shield[hit] = 0;
+        spawnParticles(E.x[hit], 1.0, E.z[hit] + 0.7, 14, 0x8c6a3f, 4.5);
+      }
+    } else if (hit >= 0) {
       // armor blocks a fraction of every bullet's damage
       // armor-piercing rounds (a stage reward) make armor block proportionally less
       const armor = TYPES[E.type[hit]].armor * (1 - player.weapon.armorPierce);
@@ -1254,6 +1327,94 @@ function renderBullets() {
     bulletMesh.setMatrixAt(b, _mOut);
   }
   bulletMesh.instanceMatrix.needsUpdate = true;
+}
+
+// ---------- Enemy projectiles (arrows) ----------
+// Same pool pattern as the bullets. Each arrow is aimed at the spot where its target soldier
+// stood when it was loosed and flies a ballistic arc to it; a red ring marks that spot until the
+// arrow lands, so the player can read where it falls and step out of the way.
+const A_MAX = 160;
+const ARROW_GRAVITY = 14;
+const A = {
+  x: new Float32Array(A_MAX), y: new Float32Array(A_MAX), z: new Float32Array(A_MAX),
+  vx: new Float32Array(A_MAX), vy: new Float32Array(A_MAX), vz: new Float32Array(A_MAX),
+  tx: new Float32Array(A_MAX), tz: new Float32Array(A_MAX), // landing spot (for the marker)
+  dmg: new Float32Array(A_MAX), on: new Uint8Array(A_MAX),
+};
+const arrowMesh = new THREE.InstancedMesh(
+  new THREE.BoxGeometry(0.05, 0.05, 0.9),
+  new THREE.MeshBasicMaterial({ color: 0xf4ead2 }),
+  A_MAX
+);
+arrowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+arrowMesh.frustumCulled = false;
+scene.add(arrowMesh);
+const markerMesh = new THREE.InstancedMesh(
+  new THREE.RingGeometry(0.32, 0.45, 20).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0xff3b30, transparent: true, opacity: 0.75, depthWrite: false, toneMapped: false }),
+  A_MAX
+);
+markerMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+markerMesh.frustumCulled = false;
+scene.add(markerMesh);
+
+// Launches an arrow from (x, y, z) that lands on (tx, ~1, tz) after dist / speed seconds.
+// Solving the arc for the vertical speed: y(T) = y + vy*T - g*T²/2 = landY.
+function fireArrow(x, y, z, tx, tz, speed, dmg) {
+  const i = A.on.indexOf(0);
+  if (i < 0) return;
+  const dx = tx - x, dz = tz - z;
+  const T = Math.max(0.4, Math.hypot(dx, dz) / speed);
+  A.x[i] = x; A.y[i] = y; A.z[i] = z;
+  A.vx[i] = dx / T;
+  A.vz[i] = dz / T;
+  A.vy[i] = (1.0 - y + 0.5 * ARROW_GRAVITY * T * T) / T;
+  A.tx[i] = tx; A.tz[i] = tz;
+  A.dmg[i] = dmg;
+  A.on[i] = 1;
+}
+
+function updateArrows(dt) {
+  for (let i = 0; i < A_MAX; i++) {
+    if (!A.on[i]) continue;
+    A.vy[i] -= ARROW_GRAVITY * dt;
+    A.x[i] += A.vx[i] * dt; A.y[i] += A.vy[i] * dt; A.z[i] += A.vz[i] * dt;
+    // only the last part of the arc, at body height, can hit a soldier
+    if (A.y[i] < 1.7 && A.vy[i] < 0) {
+      for (let k = 0; k < player.size; k++) {
+        const dx = A.x[i] - squadPos[k].x, dz = A.z[i] - squadPos[k].z;
+        if (dx * dx + dz * dz < 0.45 * 0.45) {
+          A.on[i] = 0;
+          damageSoldier(k, A.dmg[i]);
+          break;
+        }
+      }
+    }
+    if (A.on[i] && A.y[i] <= 0.05) {
+      // missed: it sticks into the road and is gone
+      A.on[i] = 0;
+      spawnParticles(A.x[i], 0.1, A.z[i], 3, 0x9a9184, 1.5);
+    }
+  }
+}
+
+function renderArrows() {
+  for (let i = 0; i < A_MAX; i++) {
+    if (!A.on[i]) { arrowMesh.setMatrixAt(i, _zero); markerMesh.setMatrixAt(i, _zero); continue; }
+    // point the shaft along its velocity: yaw from the ground direction, then pitch up or down
+    const h = Math.hypot(A.vx[i], A.vz[i]);
+    _e.set(-Math.atan2(A.vy[i], h), Math.atan2(A.vx[i], A.vz[i]), 0, 'YXZ');
+    _q.setFromEuler(_e);
+    _e.order = 'XYZ';
+    _mOut.compose(_v.set(A.x[i], A.y[i], A.z[i]), _q, _s.set(1, 1, 1));
+    arrowMesh.setMatrixAt(i, _mOut);
+    // landing marker, pulsing
+    const k = 1 + Math.sin(time * 18) * 0.12;
+    _mOut.compose(_v.set(A.tx[i], 0.03, A.tz[i]), _qIdent, _s.set(k, 1, k));
+    markerMesh.setMatrixAt(i, _mOut);
+  }
+  arrowMesh.instanceMatrix.needsUpdate = true;
+  markerMesh.instanceMatrix.needsUpdate = true;
 }
 
 // ---------- Particles ----------
@@ -1501,6 +1662,7 @@ function setupStage(idx, carry = 0, boosted = false) {
   W.next = 1;
   stageTotal = stageEnemyTotal(st);
   B.on.fill(0);
+  A.on.fill(0);
   PT.life.fill(0);
   player.x = player.targetX = player.prevX = 0;
   player.fireT = 0;
@@ -1901,6 +2063,7 @@ function simulate(dt) {
   if (playing) updateWaves(dt);
   updateBoss(dt, playing);
   updateBullets(dt);
+  updateArrows(dt);
   updateParticles(dt);
   updateScenery(dt);
 }
@@ -1911,6 +2074,7 @@ function frame() {
   simulate(dt);
   renderEnemies();
   renderBullets();
+  renderArrows();
   updatePowersHud();
   updateAmmoHud();
   updateCamera(dt);
@@ -1946,6 +2110,8 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    get arrows() { let n = 0; for (let i = 0; i < A_MAX; i++) n += A.on[i]; return n; },
+    shields() { const s = []; for (let i = 0; i < hi; i++) if (E.state[i] === 1 && TYPES[E.type[i]].shieldHp) s.push(+E.shield[i].toFixed(2)); return s; },
     // difficulty tiers (mutable, for checks) and the values applied to the current stage
     tiers: DIFFICULTY_TIERS,
     cfg: CFG, // mutable, for tuning experiments
