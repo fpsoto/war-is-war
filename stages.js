@@ -20,6 +20,13 @@
  *               ahead instead of running through the ranks), 'back' for slow ones, else 'mixed'
  *   plated      draws the armor parts (helmet and chest plate)
  *   body, skin  color palettes; each enemy picks one entry
+ * Optional:
+ *   shieldHp    a front shield that soaks this much damage before the bearer can be hurt. It is
+ *               wider than the body, so it also covers the enemies right behind it.
+ *   ranged      { range, every, draw, speed, damage }: stops `range` units short of the squad and
+ *               fires an arrow every `every` seconds at a soldier. The bow is drawn for `draw`
+ *               seconds first (the telegraph); the arrow flies in an arc at `speed` u/s and deals
+ *               `damage` to the soldier it lands on, so moving away dodges it.
  */
 export const ENEMY_TYPES = {
   soldier: {
@@ -36,6 +43,18 @@ export const ENEMY_TYPES = {
     hp: 4, speed: 1.6, armor: 0.5, contact: 2, scale: 1.3, lean: 0, placement: 'back', plated: true,
     body: ['#3f454f', '#474e59'],
     skin: ['#6e9450', '#7fa15a'],
+  },
+  shieldbearer: {
+    hp: 1, speed: 1.8, armor: 0, contact: 1, scale: 1.05, lean: 0, placement: 'front', plated: false,
+    shieldHp: 6,
+    body: ['#4d5b6e', '#55657a'],
+    skin: ['#7fa15a', '#8bb06a'],
+  },
+  archer: {
+    hp: 1, speed: 2.0, armor: 0, contact: 1, scale: 0.95, lean: 0, placement: 'back', plated: false,
+    ranged: { range: 24, every: 2.8, draw: 0.7, speed: 20, damage: 8 },
+    body: ['#5a3b2a', '#4e3424'],
+    skin: ['#8bb06a', '#94b874'],
   },
 };
 
@@ -182,6 +201,11 @@ export function validateStages(stages = STAGES) {
     if (!['front', 'mixed', 'back'].includes(t.placement)) bad("placement must be 'front', 'mixed' or 'back'");
     if (typeof t.plated !== 'boolean') bad('plated must be a boolean');
     for (const k of ['body', 'skin']) if (!Array.isArray(t[k]) || !t[k].length || !t[k].every(color)) bad(`${k} must be a list of #rrggbb colors`);
+    if (t.shieldHp !== undefined && !(num(t.shieldHp) && t.shieldHp > 0)) bad('shieldHp must be a positive number');
+    if (t.ranged !== undefined) {
+      for (const k of ['range', 'every', 'draw', 'speed', 'damage']) if (!(num(t.ranged[k]) && t.ranged[k] > 0)) bad(`ranged.${k} must be a positive number`);
+      if (t.ranged.draw >= t.ranged.every) bad('ranged.draw must be shorter than ranged.every');
+    }
   }
   // Tiers must cover stages 1..30 contiguously, without gaps or overlaps.
   let expect = 1;
