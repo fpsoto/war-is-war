@@ -390,6 +390,9 @@ const E = {
   shield: new Float32Array(MAX_E), // shield HP left (shieldbearers); 0 = no shield
   cool: new Float32Array(MAX_E),   // ranged types: seconds until the bow starts drawing
   draw: new Float32Array(MAX_E),   // ranged types: seconds of drawing left (> 0 = telegraphing a shot)
+  mode: new Uint8Array(MAX_E),     // chargers: 0 walking, 1 winding up (telegraph), 2 charging
+  modeT: new Float32Array(MAX_E),  // chargers: seconds left in the wind-up
+  aimX: new Float32Array(MAX_E),   // chargers: x of the soldier they charge at
 };
 
 // Enemy types from stages.js, indexed so the hot loops read TYPES[E.type[i]] instead of looking
@@ -526,6 +529,8 @@ function spawnEnemy(type, x, z, wave, phase) {
   // ranged types start at different points of their cycle so a line of archers doesn't volley in sync
   E.cool[i] = t.ranged ? rand(0.5, t.ranged.every) : 0;
   E.draw[i] = 0;
+  E.mode[i] = 0;
+  E.modeT[i] = 0;
   const pal = TYPE_COLORS[ti];
   bodyColors[i].copy(pal.body[i % pal.body.length]);
   skinColors[i].copy(pal.skin[(i * 7) % pal.skin.length]);
@@ -657,6 +662,7 @@ const _q = new THREE.Quaternion(), _e = new THREE.Euler(), _v = new THREE.Vector
 const _zero = new THREE.Matrix4().makeScale(0, 0, 0); // "hidden" instance
 const _qIdent = new THREE.Quaternion();
 const _white = new THREE.Color(0xffffff);
+const _warnRed = new THREE.Color(0xff2a1a);
 
 // Writes one body part of enemy i: world = enemyBase * localPart(offset, pitch).
 function setPart(mesh, i, px, py, pz, rx) {
@@ -724,6 +730,34 @@ function updateEnemies(dt, playing) {
         if (E.flash[i] > 0) E.flash[i] -= dt;
         continue;
       }
+      const charge = TYPES[E.type[i]].charge;
+      if (playing && player.size > 0 && charge && E.mode[i] !== 0) {
+        if (E.mode[i] === 1) {
+          // wind-up: rooted in place, the telegraph plays (see renderEnemies)
+          E.modeT[i] -= dt;
+          if (E.modeT[i] <= 0) {
+            E.mode[i] = 2;
+            E.speed[i] = charge.speed; // also speeds up the stride animation
+          }
+        } else {
+          // charge: straight at the soldier picked at the end of the wind-up, no lane drift
+          E.z[i] += E.speed[i] * dt;
+          E.x[i] += THREE.MathUtils.clamp(E.aimX[i] - E.x[i], -1, 1) * charge.speed * 0.4 * dt;
+          E.yaw[i] = Math.atan2(E.aimX[i] - E.x[i], player.z - E.z[i]) * 0.5;
+          E.phase[i] += dt * E.speed[i] * 3.6;
+        }
+        if (hitSquadOnContact(i, st)) break;
+        if (E.flash[i] > 0) E.flash[i] -= dt;
+        continue;
+      }
+      if (playing && player.size > 0 && charge && player.z - E.z[i] < charge.trigger) {
+        // in range: stop and start the wind-up, locking on to the nearest soldier now
+        E.mode[i] = 1;
+        E.modeT[i] = charge.windup;
+        E.aimX[i] = squadPos[nearestSoldier(E.x[i])].x;
+        E.yaw[i] = 0;
+        continue;
+      }
       if (playing && player.size > 0) {
         // Funnel: march straight while far, then drift from the lane towards the nearest soldier
         // as the distance shrinks, reaching `funnelPull` of the way on arrival. Enemies close to
@@ -744,20 +778,7 @@ function updateEnemies(dt, playing) {
         E.x[i] = THREE.MathUtils.clamp(E.x[i], -HALF_W + 0.4, HALF_W - 0.4);
         E.yaw[i] = Math.atan2(E.vx[i], E.speed[i]) * 0.7;
 
-        // Contact damages the soldier that was touched. An enemy that slips past the squad
-        // without touching anyone damages the soldier nearest to where it got through.
-        let target = -1;
-        for (let k = 0; k < player.size; k++) {
-          const dx = E.x[i] - squadPos[k].x, dz = E.z[i] - squadPos[k].z;
-          if (dx * dx + dz * dz < 0.8 * 0.8) { target = k; break; }
-        }
-        if (target < 0 && E.z[i] > player.z + 1.5) target = nearestSoldier(E.x[i]);
-        if (target >= 0) {
-          const dmg = st.contactDamage * TYPES[E.type[i]].contact;
-          killEnemy(i, false);
-          damageSoldier(target, dmg);
-          if (player.size === 0) break; // squad wiped: indices into squadPos are stale now
-        }
+        if (hitSquadOnContact(i, st)) break; // squad wiped: indices into squadPos are stale now
       }
       E.phase[i] += dt * E.speed[i] * 3.6;
     } else if (s === 2) {
@@ -767,6 +788,24 @@ function updateEnemies(dt, playing) {
     }
     if (E.flash[i] > 0) E.flash[i] -= dt;
   }
+}
+
+// Contact damages the soldier that was touched. An enemy that slips past the squad without
+// touching anyone damages the soldier nearest to where it got through. Either way the enemy is
+// spent. Returns true when that wiped out the squad.
+function hitSquadOnContact(i, st) {
+  let target = -1;
+  for (let k = 0; k < player.size; k++) {
+    const dx = E.x[i] - squadPos[k].x, dz = E.z[i] - squadPos[k].z;
+    if (dx * dx + dz * dz < 0.8 * 0.8) { target = k; break; }
+  }
+  if (target < 0 && E.z[i] > player.z + 1.5) target = nearestSoldier(E.x[i]);
+  if (target < 0) return false;
+  // Damage first, then remove the enemy: if this was the stage's last enemy, removing it first
+  // would end the stage as a win and the blow would never land.
+  damageSoldier(target, st.contactDamage * TYPES[E.type[i]].contact);
+  killEnemy(i, false);
+  return player.size === 0;
 }
 
 // Ranged attack cycle: wait (cool), then draw the bow for `draw` seconds (the telegraph the player
@@ -812,8 +851,10 @@ function renderEnemies() {
     }
     const ph = E.phase[i];
     const bob = st === 1 ? Math.abs(Math.sin(ph)) * 0.07 : 0;
-    // forward lean (runners) only while alive; a dying enemy falls from upright
-    const pitch = st === 1 ? type.lean : fall;
+    // forward lean (runners) only while alive; a dying enemy falls from upright. Chargers rear
+    // back during the wind-up and throw themselves forward while charging.
+    const mode = st === 1 ? E.mode[i] : 0;
+    const pitch = st !== 1 ? fall : mode === 1 ? -0.15 : mode === 2 ? 0.45 : type.lean;
     // 'YXZ' = turn (yaw) first, then tip over (pitch) in the turned frame
     _e.set(pitch, E.yaw[i], 0, 'YXZ');
     _q.setFromEuler(_e);
@@ -829,7 +870,12 @@ function renderEnemies() {
     // Arm pitch: arms point forward (+z) at 0; positive pitch lowers them. Leaning types (runners)
     // pump their arms down by their sides against the legs; the rest keep zombie-style raised
     // arms with a slight sway.
-    if (st === 1 && type.lean > 0) {
+    if (mode === 1) {
+      // wind-up telegraph: both arms thrown up, shaking
+      const shake = Math.sin(time * 40) * 0.12;
+      setPart(P.armL, i, -0.34, 1.07, 0, -2.0 + shake);
+      setPart(P.armR, i, 0.34, 1.07, 0, -2.0 - shake);
+    } else if (st === 1 && type.lean > 0) {
       setPart(P.armL, i, -0.34, 1.07, 0, 1.2 - swing * 0.9);
       setPart(P.armR, i, 0.34, 1.07, 0, 1.2 + swing * 0.9);
     } else if (st === 1 && type.ranged) {
@@ -859,10 +905,11 @@ function renderEnemies() {
     if (type.ranged && st === 1) setPart(P.bow, i, -0.3, 1.12, 0.58, 0);
     else P.bow.setMatrixAt(i, _zero);
 
-    // hit feedback: flash white for a few frames
+    // hit feedback: flash white for a few frames; a winding-up charger pulses red instead
     const flashing = E.flash[i] > 0;
-    P.torso.setColorAt(i, flashing ? _white : bodyColors[i]);
-    P.head.setColorAt(i, flashing ? _white : skinColors[i]);
+    const warning = mode === 1 && Math.sin(time * 24) > 0;
+    P.torso.setColorAt(i, flashing ? _white : warning ? _warnRed : bodyColors[i]);
+    P.head.setColorAt(i, flashing ? _white : warning ? _warnRed : skinColors[i]);
   }
   for (const key in P) P[key].instanceMatrix.needsUpdate = true;
   P.torso.instanceColor.needsUpdate = true;
@@ -2110,6 +2157,7 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    chargers() { const s = []; for (let i = 0; i < hi; i++) if (E.state[i] === 1 && TYPES[E.type[i]].charge) s.push({ mode: E.mode[i], z: +E.z[i].toFixed(2) }); return s; },
     get arrows() { let n = 0; for (let i = 0; i < A_MAX; i++) n += A.on[i]; return n; },
     shields() { const s = []; for (let i = 0; i < hi; i++) if (E.state[i] === 1 && TYPES[E.type[i]].shieldHp) s.push(+E.shield[i].toFixed(2)); return s; },
     // difficulty tiers (mutable, for checks) and the values applied to the current stage
