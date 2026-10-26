@@ -27,6 +27,9 @@
  *               fires an arrow every `every` seconds at a soldier. The bow is drawn for `draw`
  *               seconds first (the telegraph); the arrow flies in an arc at `speed` u/s and deals
  *               `damage` to the soldier it lands on, so moving away dodges it.
+ *   charge      { trigger, windup, speed }: walks until `trigger` units from the squad, stops
+ *               and winds up for `windup` seconds (flashing red, arms raised: the telegraph),
+ *               then charges straight at its target soldier at `speed` u/s.
  */
 export const ENEMY_TYPES = {
   soldier: {
@@ -55,6 +58,12 @@ export const ENEMY_TYPES = {
     ranged: { range: 24, every: 2.8, draw: 0.7, speed: 20, damage: 8 },
     body: ['#5a3b2a', '#4e3424'],
     skin: ['#8bb06a', '#94b874'],
+  },
+  berserker: {
+    hp: 3, speed: 2.0, armor: 0, contact: 3, scale: 1.15, lean: 0.15, placement: 'mixed', plated: false,
+    charge: { trigger: 15, windup: 0.8, speed: 9 },
+    body: ['#8a2f22', '#7a2a1e'],
+    skin: ['#6e9450', '#7fa15a'],
   },
 };
 
@@ -206,6 +215,10 @@ export function validateStages(stages = STAGES) {
       for (const k of ['range', 'every', 'draw', 'speed', 'damage']) if (!(num(t.ranged[k]) && t.ranged[k] > 0)) bad(`ranged.${k} must be a positive number`);
       if (t.ranged.draw >= t.ranged.every) bad('ranged.draw must be shorter than ranged.every');
     }
+    if (t.charge !== undefined) {
+      for (const k of ['trigger', 'windup', 'speed']) if (!(num(t.charge[k]) && t.charge[k] > 0)) bad(`charge.${k} must be a positive number`);
+    }
+    if (t.ranged && t.charge) bad('a type can be ranged or a charger, not both');
   }
   // Tiers must cover stages 1..30 contiguously, without gaps or overlaps.
   let expect = 1;
