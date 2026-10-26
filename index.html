@@ -77,6 +77,16 @@
     .enemy-bar.boss .skull { background: #6a1f8f; }
     .enemy-bar.boss .bar > i { background: linear-gradient(#d07bff, #9b2fd6 60%, #5e1385); }
     .enemy-bar.boss .count { font-size: calc(18 * var(--u)); }
+    /* phase thresholds as white ticks; the bar glows while the boss is vulnerable */
+    .enemy-bar.boss .bar .marker {
+      position: absolute; top: 0; bottom: 0; width: 2px; transform: translateX(-1px);
+      background: rgba(255,255,255,.9); z-index: 1;
+    }
+    .enemy-bar.boss.vulnerable .bar { animation: vulnerable .5s ease-in-out infinite alternate; }
+    @keyframes vulnerable {
+      from { box-shadow: 0 0 4px 1px rgba(255,210,58,.6); }
+      to { box-shadow: 0 0 12px 4px rgba(255,210,58,1); }
+    }
     .hidden { display: none !important; }
     .stage {
       margin-top: calc(8 * var(--u)); text-align: center; font-size: calc(18 * var(--u)); letter-spacing: 1px;

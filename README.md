@@ -28,7 +28,11 @@ zero health falls and the squad closes ranks. The stage is lost when the last so
 1. **100 soldiers** marching in a tight formation.
 2. **500 soldiers** filling the bridge wall to wall.
 3. **500 soldiers and a giant**: a club-wielding brute about 3.6× the size of a soldier
-   walks in the middle of the horde. It soaks bullets and crushes the squad if it reaches it.
+   walks in the middle of the horde with its guard up. Once in reach it plants its feet and
+   attacks: every slam and sweep is announced by a wind-up and a red zone on the road, so step
+   out of it. Right after each blow it is winded and takes extra damage. Below half health it
+   gets enraged: faster, with a double slam.
+4–6. Runners, then armored Heavies, then both together.
 
 Clearing a stage takes you to the next one, and you keep any soldiers you recruited.
 

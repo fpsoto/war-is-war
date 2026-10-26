@@ -1004,18 +1004,90 @@ function buildGiant() {
   blob.position.y = 0.02;
   g.add(blob);
 
-  return { group: g, legs, arms, mats: [skin, hide, metal, bone] };
+  return { group: g, legs, arms, mats: [skin, hide, metal, bone], eyes };
 }
 
 const giant = buildGiant();
 giant.group.visible = false;
 scene.add(giant.group);
-// state: 0 inactive, 1 alive, 2 dying
-const boss = { active: false, state: 0, hp: 0, maxHp: 1, x: 0, z: 0, speed: 1, phase: 0, flash: 0, t: 0, scale: 1, lastStep: 0 };
+// ---------- Boss framework ----------
+// state: 0 inactive, 1 alive, 2 dying. While alive, `mode` runs the attack loop described with
+// BOSS_TYPES in stages.js:
+//   approach (marching with its wave) → pause → windup → strike → recover → pause → windup …
+// Every attack is announced: a wind-up pose plus a red zone on the road that fills up until the
+// strike lands, so the player always has the wind-up time to step out of it. After the strike
+// the boss slumps in a recovery window where it takes extra damage (it glows and the boss bar
+// pulses). Phases switch at HP fractions and change the attack pool and tempo.
+const boss = {
+  active: false, state: 0, hp: 0, maxHp: 1, x: 0, z: 0, speed: 1, phase: 0, flash: 0, t: 0, scale: 1, lastStep: 0,
+  def: null, phaseIdx: 0, mode: 'approach', modeT: 0, modeLen: 1, attack: null, lastAttack: '', side: 1,
+};
+
+// Impact zone decals: a faint outline of the whole zone plus a fill that grows with the wind-up.
+const ZONE_MAX = 4;
+const zoneCircleGeo = new THREE.CircleGeometry(1, 40).rotateX(-Math.PI / 2);
+const zoneRectGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+const zoneMaterial = (opacity) => new THREE.MeshBasicMaterial({
+  color: 0xff2a1a, transparent: true, opacity, depthWrite: false, toneMapped: false,
+});
+const zones = Array.from({ length: ZONE_MAX }, () => {
+  const z = {
+    on: false, kind: '', x: 0, z: 0, r: 0, x0: 0, x1: 0, z0: 0, z1: 0,
+    outline: new THREE.Mesh(zoneCircleGeo, zoneMaterial(0.22)),
+    fill: new THREE.Mesh(zoneCircleGeo, zoneMaterial(0.4)),
+  };
+  for (const m of [z.outline, z.fill]) { m.visible = false; m.renderOrder = 2; scene.add(m); }
+  return z;
+});
+
+function clearZones() {
+  for (const z of zones) { z.on = false; z.outline.visible = z.fill.visible = false; }
+}
+
+function setSlamZone(zone, x, zz, r) {
+  Object.assign(zone, { on: true, kind: 'slam', x, z: zz, r });
+  zone.outline.geometry = zone.fill.geometry = zoneCircleGeo;
+}
+
+// The sweep covers the half of the road on `side` (-1 left, 1 right) around the squad's depth.
+function setSweepZone(zone, side) {
+  const x0 = side > 0 ? 0 : -HALF_W, x1 = side > 0 ? HALF_W : 0;
+  Object.assign(zone, { on: true, kind: 'sweep', x0, x1, z0: player.z - 1.8, z1: player.z + 1.8 });
+  zone.outline.geometry = zone.fill.geometry = zoneRectGeo;
+}
+
+function inZone(zone, x, zz) {
+  if (zone.kind === 'slam') return (x - zone.x) ** 2 + (zz - zone.z) ** 2 < zone.r * zone.r;
+  return x >= zone.x0 && x <= zone.x1 && zz >= zone.z0 && zz <= zone.z1;
+}
+
+// p: wind-up progress 0..1. The outline shows the full zone; the fill grows to meet it.
+function renderZones(p) {
+  const pulse = 0.85 + Math.sin(time * 16) * 0.15;
+  for (const z of zones) {
+    if (!z.on) continue;
+    z.outline.visible = z.fill.visible = true;
+    if (z.kind === 'slam') {
+      z.outline.position.set(z.x, 0.04, z.z);
+      z.outline.scale.set(z.r, 1, z.r);
+      z.fill.position.set(z.x, 0.05, z.z);
+      z.fill.scale.set(z.r * p, 1, z.r * p);
+    } else {
+      const cx = (z.x0 + z.x1) / 2, cz = (z.z0 + z.z1) / 2, w = z.x1 - z.x0, d = z.z1 - z.z0;
+      z.outline.position.set(cx, 0.04, cz);
+      z.outline.scale.set(w, 1, d);
+      // the sweep fills from the road's edge towards the middle, like the club coming round
+      z.fill.position.set(z.x0 > -0.01 ? z.x1 - (w * p) / 2 : z.x0 + (w * p) / 2, 0.05, cz);
+      z.fill.scale.set(w * p, 1, d);
+    }
+    z.fill.material.opacity = 0.4 * pulse;
+  }
+}
 
 // def is a wave's boss entry ({ type, gap }); pace is the stage's speed multiplier (stage pace × tier).
 function spawnBoss(def, z, pace) {
   const type = BOSS_TYPES[def.type];
+  boss.def = type;
   boss.active = true;
   boss.state = 1;
   boss.hp = boss.maxHp = type.hp;
@@ -1026,66 +1098,196 @@ function spawnBoss(def, z, pace) {
   boss.phase = 0;
   boss.flash = 0;
   boss.t = 0;
+  boss.phaseIdx = 0;
+  boss.mode = 'approach';
+  boss.attack = null;
+  boss.lastAttack = '';
   giant.group.visible = true;
   giant.group.rotation.set(0, 0, 0);
   giant.group.scale.setScalar(boss.scale);
+  giant.eyes.color.set(0xffe14a);
+  clearZones();
+  // phase thresholds as ticks on the boss bar
+  const bar = ui.bossBar.querySelector('.bar');
+  bar.querySelectorAll('.marker').forEach((m) => m.remove());
+  for (const p of type.phases.slice(1)) {
+    const m = document.createElement('b');
+    m.className = 'marker';
+    m.style.left = `${p.at * 100}%`;
+    bar.appendChild(m);
+  }
+  ui.bossBar.classList.remove('vulnerable');
 }
 
 function hideBoss() {
   boss.active = false;
   boss.state = 0;
   giant.group.visible = false;
+  clearZones();
+  ui.bossBar.classList.remove('vulnerable');
+}
+
+function setBossMode(mode, seconds) {
+  boss.mode = mode;
+  boss.modeT = boss.modeLen = seconds;
+  ui.bossBar.classList.toggle('vulnerable', mode === 'recover');
+}
+
+// Picks the next attack from the current phase (never the same one twice in a row when there is
+// a choice), locks its targets and lays out its zones.
+function startBossAttack() {
+  const phase = boss.def.phases[boss.phaseIdx];
+  let pool = phase.attacks;
+  if (pool.length > 1) pool = pool.filter((a) => a !== boss.lastAttack);
+  const name = pool[Math.floor(Math.random() * pool.length)];
+  const a = boss.def.attacks[name];
+  boss.attack = a;
+  boss.lastAttack = name;
+  clearZones();
+  if (a.kind === 'slam') {
+    // one zone per target, under different soldiers when the squad is big enough
+    const order = Array.from({ length: player.size }, (_, k) => k).sort(() => Math.random() - 0.5);
+    for (let n = 0; n < a.count && n < ZONE_MAX; n++) {
+      const k = order[n % order.length];
+      const off = n >= order.length ? (n % 2 ? 2.5 : -2.5) : 0; // small squads: spread extra zones
+      setSlamZone(zones[n], THREE.MathUtils.clamp(squadPos[k].x + off, -HALF_W, HALF_W), squadPos[k].z, a.radius);
+    }
+  } else {
+    // sweep the half the squad stands on (a coin flip when it's dead centre)
+    boss.side = Math.abs(player.x) < 0.3 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(player.x);
+    setSweepZone(zones[0], boss.side);
+  }
+  setBossMode('windup', a.windup * phase.tempo);
+}
+
+// The strike: every soldier standing in a zone takes the hit. Walk the squad backwards because
+// a soldier that falls is swapped with the last living one.
+function bossStrike() {
+  const a = boss.attack;
+  for (let k = player.size - 1; k >= 0; k--) {
+    for (const z of zones) {
+      if (z.on && inZone(z, squadPos[k].x, squadPos[k].z)) { damageSoldier(k, a.damage); break; }
+    }
+  }
+  for (const z of zones) {
+    if (!z.on) continue;
+    const cx = z.kind === 'slam' ? z.x : (z.x0 + z.x1) / 2, cz = z.kind === 'slam' ? z.z : (z.z0 + z.z1) / 2;
+    spawnParticles(cx, 0.2, cz, 18, 0x9a9184, 6);
+  }
+  shake = Math.max(shake, 0.6);
+  clearZones();
+  setBossMode('strike', 0.25);
 }
 
 function updateBoss(dt, playing) {
   if (!boss.active) return;
   const g = giant.group;
   if (boss.state === 1) {
-    if (playing) {
-      boss.z += boss.speed * dt;
-      const reach = 0.6 * boss.scale;
-      if (boss.z + reach > player.z - 0.4) {
-        // the giant crushes the whole squad: instant defeat (#20 replaces this with real attacks)
-        while (player.size > 0) damageSoldier(0, Infinity);
-        shake = 0.8;
+    const phase = boss.def.phases[boss.phaseIdx];
+    if (playing && player.size > 0) boss.modeT -= dt;
+    let lean = 0, twist = 0, bob = 0;
+    const arms = giant.arms, legs = giant.legs;
+    switch (boss.mode) {
+      case 'approach': {
+        if (playing) boss.z += boss.speed * dt;
+        boss.phase += dt * boss.speed * 2.2;
+        const step = Math.sin(boss.phase);
+        legs[0].rotation.x = step * 0.45;
+        legs[1].rotation.x = -step * 0.45;
+        arms[0].rotation.set(-step * 0.35, 0, 0);
+        arms[1].rotation.set(step * 0.35, 0, 0);
+        bob = Math.abs(Math.cos(boss.phase)) * 0.12;
+        twist = step * 0.05;
+        // a small camera shake every time a foot lands (sign change of the step cycle)
+        const stepSign = Math.sign(step);
+        if (playing && stepSign !== boss.lastStep) { boss.lastStep = stepSign; shake = Math.max(shake, 0.12); }
+        // in reach: plant its feet and start the attack loop
+        if (boss.z >= player.z - boss.def.engage) {
+          legs[0].rotation.x = legs[1].rotation.x = 0;
+          setBossMode('pause', 0.8 * phase.tempo);
+        }
+        break;
       }
+      case 'pause':
+        // breathing idle with the club resting
+        arms[0].rotation.set(-0.2, 0, 0);
+        arms[1].rotation.set(-0.4 + Math.sin(time * 3) * 0.08, 0, 0);
+        if (boss.modeT <= 0) startBossAttack();
+        break;
+      case 'windup': {
+        const p = 1 - Math.max(0, boss.modeT) / boss.modeLen;
+        const e = p * p * (3 - 2 * p); // smoothstep: slow start, decisive finish
+        const tremble = p > 0.75 ? Math.sin(time * 50) * 0.04 : 0;
+        if (boss.attack.kind === 'slam') {
+          // club raised overhead, leaning back
+          arms[1].rotation.set(-2.7 * e + tremble, 0, 0);
+          arms[0].rotation.set(-1.2 * e, 0, 0);
+          lean = -0.18 * e;
+        } else {
+          // club drawn back across the body, torso twisting away from the side it will sweep
+          arms[1].rotation.set(-1.4 * e, 0, -boss.side * 1.3 * e + tremble);
+          arms[0].rotation.set(-0.6 * e, 0, 0);
+          twist = boss.side * 0.25 * e;
+        }
+        renderZones(p);
+        if (boss.modeT <= 0) bossStrike();
+        break;
+      }
+      case 'strike': {
+        // the blow: club driven down (slam) or across (sweep)
+        if (boss.attack.kind === 'slam') arms[1].rotation.set(0.7, 0, 0);
+        else arms[1].rotation.set(-1.0, 0, boss.side * 1.4);
+        lean = boss.attack.kind === 'slam' ? 0.25 : 0;
+        if (boss.modeT <= 0) setBossMode('recover', boss.attack.recover);
+        break;
+      }
+      case 'recover':
+        // slumped and winded: the window to punish it
+        arms[0].rotation.set(0.3, 0, 0);
+        arms[1].rotation.set(0.5, 0, 0);
+        lean = 0.3 + Math.sin(time * 4) * 0.03;
+        if (boss.modeT <= 0) setBossMode('pause', 0.6 * phase.tempo);
+        break;
     }
-    boss.phase += dt * boss.speed * 2.2;
-    const step = Math.sin(boss.phase);
-    giant.legs[0].rotation.x = step * 0.45;
-    giant.legs[1].rotation.x = -step * 0.45;
-    giant.arms[0].rotation.x = -step * 0.35;
-    // blend from a normal arm swing to "club raised overhead" as it closes in
-    const near = THREE.MathUtils.clamp((boss.z - (player.z - 18)) / 10, 0, 1);
-    giant.arms[1].rotation.x = step * 0.35 * (1 - near) - near * (2.4 + Math.sin(time * 6) * 0.3);
-    g.rotation.set(0, 0, step * 0.05);
-    g.position.set(boss.x, Math.abs(Math.cos(boss.phase)) * 0.12, boss.z);
-    // a small camera shake every time a foot lands (sign change of the step cycle)
-    const stepSign = Math.sign(step);
-    if (playing && stepSign !== boss.lastStep) {
-      boss.lastStep = stepSign;
-      shake = Math.max(shake, 0.12);
-    }
+    g.rotation.set(lean, twist, boss.mode === 'approach' ? twist : 0, 'YXZ');
+    g.position.set(boss.x, bob, boss.z);
   } else if (boss.state === 2) {
     boss.t += dt;
-    g.rotation.x = -Math.min(boss.t / 0.9, 1) * Math.PI / 2;
+    g.rotation.set(-Math.min(boss.t / 0.9, 1) * Math.PI / 2, 0, 0);
     g.position.y = -Math.max(0, boss.t - 1.6) * 2;
     if (boss.t > 3.5) hideBoss();
   }
   if (boss.flash > 0) boss.flash -= dt;
-  const glow = boss.flash > 0 ? 0.55 : 0;
+  // white flash on hit; a slow pulse while vulnerable in the recovery window
+  const vulnerable = boss.state === 1 && boss.mode === 'recover';
+  const glow = boss.flash > 0 ? 0.55 : vulnerable ? 0.18 + Math.sin(time * 10) * 0.1 : 0;
   for (const m of giant.mats) m.emissiveIntensity = glow;
 }
 
 function hitBoss(x, y, z) {
-  boss.hp--;
-  boss.flash = 0.06;
-  spawnParticles(x, y, z, 3, 0xffd36b, 3);
+  // The recovery window is the boss's weak moment: extra damage. While it marches in its guard is
+  // up and most of the damage is blocked (metal sparks), so it reaches attack range.
+  const guarding = boss.mode === 'approach';
+  const mult = boss.mode === 'recover' ? boss.def.recoverDamage : guarding ? 1 - boss.def.approachArmor : 1;
+  boss.hp -= player.weapon.damage * mult;
+  boss.flash = guarding ? 0.03 : 0.06;
+  if (guarding) spawnParticles(x, y, z, 3, 0xdfe6ee, 4);
+  else spawnParticles(x, y, z, 3, mult > 1 ? 0xfff1a8 : 0xffd36b, mult > 1 ? 4 : 3);
+  // phase change when HP crosses the next threshold
+  const next = boss.def.phases[boss.phaseIdx + 1];
+  if (next && boss.hp > 0 && boss.hp / boss.maxHp <= next.at) {
+    boss.phaseIdx++;
+    giant.eyes.color.set(0xff2a1a);
+    shake = Math.max(shake, 0.5);
+    if (next.banner) showBanner(next.banner, 'Faster attacks · new moves');
+  }
   updateHud();
   if (boss.hp <= 0) {
     boss.state = 2;
     boss.t = 0;
     shake = 0.7;
+    clearZones();
+    ui.bossBar.classList.remove('vulnerable');
     for (let k = 0; k < 6; k++) {
       spawnParticles(boss.x + rand(-1, 1), rand(1, 4), boss.z + rand(-1, 1), 12, k % 2 ? 0x9a3b2c : 0xffc04a, 7);
     }
@@ -2157,6 +2359,13 @@ if (params.has('debug')) {
     get active() { return activeCap - freeTop; }, get hi() { return hi; }, activeCap,
     get queuedRows() { return W.queue.length; }, get nextWave() { return W.next; },
     get waveAlive() { return [...W.alive]; }, get kills() { return kills; },
+    get boss() {
+      return {
+        state: boss.state, mode: boss.mode, hp: +boss.hp.toFixed(1), phase: boss.phaseIdx, z: +boss.z.toFixed(1),
+        attack: boss.lastAttack, zones: zones.filter((z) => z.on).map((z) => (z.kind === 'slam'
+          ? { kind: z.kind, x: +z.x.toFixed(2), z: +z.z.toFixed(2), r: z.r } : { kind: z.kind, x0: z.x0, x1: z.x1 })),
+      };
+    },
     chargers() { const s = []; for (let i = 0; i < hi; i++) if (E.state[i] === 1 && TYPES[E.type[i]].charge) s.push({ mode: E.mode[i], z: +E.z[i].toFixed(2) }); return s; },
     get arrows() { let n = 0; for (let i = 0; i < A_MAX; i++) n += A.on[i]; return n; },
     shields() { const s = []; for (let i = 0; i < hi; i++) if (E.state[i] === 1 && TYPES[E.type[i]].shieldHp) s.push(+E.shield[i].toFixed(2)); return s; },
