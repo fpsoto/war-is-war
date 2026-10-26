@@ -278,4 +278,5 @@ Decisions taken when the spec was adopted (2026-10-23). They change the existing
 - **Two reward systems.** The shootable signs along the bridge edges stay as in-stage power-ups. The rewards in the tables above are granted when a stage is cleared, plus the 3-choice upgrade screen (#17).
 - **Save system.** The game had none. Progress, permanent upgrades and the endless-mode unlock are stored in the browser's `localStorage` (#17).
 - **Enemy rendering.** Enemy types reuse the instanced body-part meshes, with per-instance color and scale and extra parts only where a type needs them, to keep draw calls flat (#12).
+- **Bosses** run a shared attack loop driven by data (`BOSS_TYPES` in `stages.js`): approach, then wind-up with a red impact zone on the road, strike, and a recovery window with extra damage taken; phases switch at HP fractions. Bosses keep a guard up while marching in (most damage blocked), otherwise the squad shoots them down before they ever reach attack range (#20).
 - **Planning.** The campaign is split into one issue per change across Sprints 2–7 (milestones `v0.2.0`–`v0.7.0`) on the "War is War" project board.

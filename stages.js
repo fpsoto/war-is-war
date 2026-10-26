@@ -102,9 +102,38 @@ export function tierFor(stageId) {
  */
 export const REWARD_TYPES = ['none', 'fireRateBoost', 'armorPiercing', 'reloadSpeed', 'rifleUpgrade', 'grenade'];
 
+/*
+ * Bosses (docs/level-design.md §7). A boss marches in with its wave until it is `engage` units
+ * from the squad, then stops and attacks in a loop: wind-up (with a telegraph and a marked
+ * impact zone on the road), impact, then a recovery window in which it takes `recoverDamage`×
+ * damage. Phases switch at health fractions and change the attack pool and tempo.
+ *   hp, scale, engage, recoverDamage
+ *   approachArmor  share of damage blocked while it marches in (its guard is up). Without it the
+ *                  squad shoots a boss down long before it reaches attack range and the fight
+ *                  never happens.
+ *   phases[]   { at: HP fraction where the phase starts (first = 1), attacks: [names],
+ *                tempo: multiplier on wind-up and pause times (< 1 = faster), banner?: text }
+ *   attacks    name -> { kind, windup, recover, damage, ... } where kind is
+ *                'slam'  a shockwave under the soldier targeted at wind-up start: radius,
+ *                        count (several zones, one per targeted soldier)
+ *                'sweep' the club sweeps the half of the road the squad stands on; cross to
+ *                        the other half to dodge
+ */
 export const BOSS_TYPES = {
-  brute: { hp: 160, scale: 3.6 },
+  brute: {
+    hp: 500, scale: 3.6, engage: 15, recoverDamage: 1.5, approachArmor: 0.6,
+    phases: [
+      { at: 1, attacks: ['slam', 'sweep'], tempo: 1 },
+      { at: 0.5, attacks: ['slam', 'sweep', 'doubleSlam'], tempo: 0.75, banner: 'THE BRUTE IS ENRAGED!' },
+    ],
+    attacks: {
+      slam: { kind: 'slam', windup: 1.4, recover: 1.4, damage: 35, radius: 1.7, count: 1 },
+      sweep: { kind: 'sweep', windup: 1.3, recover: 1.2, damage: 30 },
+      doubleSlam: { kind: 'slam', windup: 1.3, recover: 1.8, damage: 30, radius: 1.5, count: 2 },
+    },
+  },
 };
+export const BOSS_ATTACK_KINDS = ['slam', 'sweep'];
 
 /*
  * Stage fields:
@@ -138,7 +167,7 @@ export const STAGES = [
   {
     id: 2, name: 'The Bridge', text: '500 soldiers wall to wall',
     // 500 enemies wall to wall: low contact damage so it's about covering the width, not one leak
-    squad: 2, pace: 0.8, fireInterval: 0.06, contactDamage: 2.5,
+    squad: 2, pace: 0.8, fireInterval: 0.06, contactDamage: 2,
     reward: { type: 'fireRateBoost', amount: 0.15, temporary: true },
     waves: [
       { enemies: { soldier: 500 }, formation: { cols: 14, fullWidth: true, spacingZ: 0.95, startZ: -32 } },
@@ -219,6 +248,23 @@ export function validateStages(stages = STAGES) {
       for (const k of ['trigger', 'windup', 'speed']) if (!(num(t.charge[k]) && t.charge[k] > 0)) bad(`charge.${k} must be a positive number`);
     }
     if (t.ranged && t.charge) bad('a type can be ranged or a charger, not both');
+  }
+  for (const [name, b] of Object.entries(BOSS_TYPES)) {
+    const bad = (msg) => { throw new Error(`Boss '${name}': ${msg}`); };
+    for (const k of ['hp', 'scale', 'engage', 'recoverDamage']) if (!num(b[k]) || b[k] <= 0) bad(`${k} must be a positive number`);
+    if (!num(b.approachArmor) || b.approachArmor < 0 || b.approachArmor >= 1) bad('approachArmor must be in [0, 1)');
+    if (!Array.isArray(b.phases) || !b.phases.length || b.phases[0].at !== 1) bad('phases must start with one at 1');
+    b.phases.forEach((p, i) => {
+      if (i > 0 && !(num(p.at) && p.at > 0 && p.at < b.phases[i - 1].at)) bad(`phase ${i + 1}: at must be below the previous phase's`);
+      if (!num(p.tempo) || p.tempo <= 0) bad(`phase ${i + 1}: tempo must be a positive number`);
+      if (!Array.isArray(p.attacks) || !p.attacks.length) bad(`phase ${i + 1}: attacks is empty`);
+      for (const a of p.attacks) if (!b.attacks?.[a]) bad(`phase ${i + 1}: unknown attack '${a}'`);
+    });
+    for (const [an, a] of Object.entries(b.attacks || {})) {
+      if (!BOSS_ATTACK_KINDS.includes(a.kind)) bad(`attack ${an}: kind must be one of ${BOSS_ATTACK_KINDS.join(', ')}`);
+      for (const k of ['windup', 'recover', 'damage']) if (!num(a[k]) || a[k] <= 0) bad(`attack ${an}: ${k} must be a positive number`);
+      if (a.kind === 'slam' && !(num(a.radius) && a.radius > 0 && Number.isInteger(a.count) && a.count > 0)) bad(`attack ${an}: slam needs radius and an integer count`);
+    }
   }
   // Tiers must cover stages 1..30 contiguously, without gaps or overlaps.
   let expect = 1;
